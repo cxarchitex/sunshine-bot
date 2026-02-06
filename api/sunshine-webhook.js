@@ -1,7 +1,5 @@
 // /api/sunshine-webhook.js
 
-import fetch from 'node-fetch';
-
 export default async function handler(req, res) {
   // Sunshine sends HEAD requests for validation
   if (req.method === 'HEAD') {
@@ -20,7 +18,7 @@ export default async function handler(req, res) {
     const appId = body?.app?.id;
     const message = body?.messages?.[0];
 
-    // Ignore anything that is not a user message
+    // Only process real user messages
     if (trigger !== 'conversation:message') {
       return res.status(200).end();
     }
@@ -33,14 +31,13 @@ export default async function handler(req, res) {
 
     console.log('SUNSHINE USER MESSAGE:', userText, conversationId);
 
-    // Basic bot response
     let replyText = 'Hi 👋 How can I help you today?';
 
     if (userText?.toLowerCase().includes('order')) {
       replyText = 'Sure, please share your order number.';
     }
 
-    // Send reply back to Sunshine Conversations
+    // Native fetch (Node 18+)
     await fetch(
       `https://api.smooch.io/v2/apps/${appId}/conversations/${conversationId}/messages`,
       {
@@ -54,9 +51,7 @@ export default async function handler(req, res) {
             ).toString('base64'),
         },
         body: JSON.stringify({
-          author: {
-            type: 'business',
-          },
+          author: { type: 'business' },
           content: {
             type: 'text',
             text: replyText,
