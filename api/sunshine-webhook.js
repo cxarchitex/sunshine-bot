@@ -1,36 +1,73 @@
-import axios from "axios";
+// /api/sunshine-webhook.js
+
+import fetch from 'node-fetch';
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
+  // Sunshine sends HEAD requests for validation
+  if (req.method === 'HEAD') {
     return res.status(200).end();
   }
 
-  const event = req.body;
-
-  const message = event?.event?.message?.content?.text;
-  const role = event?.event?.message?.author?.role;
-  const conversationId = event?.event?.conversation?.id;
-
-  if (role !== "end_user") {
-    return res.status(200).end();
+  if (req.method !== 'POST') {
+    return res.status(405).end();
   }
 
-  console.log("User said:", message);
+  try {
+    const body = req.body;
 
-  await axios.post(
-    `https://api.smooch.io/v2/apps/${process.env.SUNSHINE_APP_ID}/conversations/${conversationId}/messages`,
-    {
-      role: "appMaker",
-      type: "text",
-      text: "Hi 👋 I am connected. Please share your order number."
-    },
-    {
-      auth: {
-        username: process.env.SUNSHINE_KEY_ID,
-        password: process.env.SUNSHINE_SECRET
-      }
+    const trigger = body?.trigger;
+    const conversationId = body?.conversation?.id;
+    const appId = body?.app?.id;
+    const message = body?.messages?.[0];
+
+    // Ignore anything that is not a user message
+    if (trigger !== 'conversation:message') {
+      return res.status(200).end();
     }
-  );
 
-  res.status(200).end();
+    if (message?.author?.type !== 'user') {
+      return res.status(200).end();
+    }
+
+    const userText = message?.content?.text?.trim();
+
+    console.log('SUNSHINE USER MESSAGE:', userText, conversationId);
+
+    // Basic bot response
+    let replyText = 'Hi 👋 How can I help you today?';
+
+    if (userText?.toLowerCase().includes('order')) {
+      replyText = 'Sure, please share your order number.';
+    }
+
+    // Send reply back to Sunshine Conversations
+    await fetch(
+      `https://api.smooch.io/v2/apps/${appId}/conversations/${conversationId}/messages`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization:
+            'Basic ' +
+            Buffer.from(
+              `${process.env.SUNSHINE_KEY_ID}:${process.env.SUNSHINE_KEY_SECRET}`
+            ).toString('base64'),
+        },
+        body: JSON.stringify({
+          author: {
+            type: 'business',
+          },
+          content: {
+            type: 'text',
+            text: replyText,
+          },
+        }),
+      }
+    );
+
+    return res.status(200).end();
+  } catch (error) {
+    console.error('SUNSHINE WEBHOOK ERROR:', error);
+    return res.status(500).end();
+  }
 }
