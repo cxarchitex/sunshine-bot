@@ -16,8 +16,11 @@ export default async function handler(req, res) {
 
   try {
     const { session_id, message } = req.body || {};
+
     if (!session_id || !message) {
-      return res.status(400).json({ error: "Missing session_id or message" });
+      return res.status(400).json({
+        error: "Missing session_id or message"
+      });
     }
 
     let conversationId = sessionConversationMap.get(session_id);
@@ -36,11 +39,11 @@ export default async function handler(req, res) {
     return res.status(200).json({ reply });
   } catch (err) {
     console.error("CHAT MESSAGE ERROR:", err);
-    return res.status(500).json({ error: "Internal server error" });
+    return res.status(500).json({
+      error: "Internal server error"
+    });
   }
 }
-
-/* helpers */
 
 function getBotReply(text = "") {
   if (/order|track/i.test(text)) {
@@ -63,12 +66,12 @@ async function createConversation() {
           "Basic " +
           Buffer.from(
             `${process.env.SUNSHINE_KEY_ID}:${process.env.SUNSHINE_KEY_SECRET}`
-          ).toString("base64"),
+          ).toString("base64")
       },
       body: JSON.stringify({
         type: "personal",
-        participants: [{ role: "user" }],
-      }),
+        participants: [{ role: "user" }]
+      })
     }
   );
 
@@ -92,12 +95,15 @@ async function sendMessage(conversationId, text, sender) {
           "Basic " +
           Buffer.from(
             `${process.env.SUNSHINE_KEY_ID}:${process.env.SUNSHINE_KEY_SECRET}`
-          ).toString("base64"),
+          ).toString("base64")
       },
       body: JSON.stringify({
         author: sender === "bot" ? { type: "business" } : { type: "user" },
-        content: { type: "text", text },
-      }),
+        content: {
+          type: "text",
+          text
+        }
+      })
     }
   );
 }
