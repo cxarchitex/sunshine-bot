@@ -20,20 +20,28 @@ export default async function handler(req, res) {
   }
 
   const text = message.content?.text?.trim();
-  console.log("USER MESSAGE:", text);
+  console.log("USER MESSAGE (Zendesk):", text);
 
-  let reply = "Got it. I’m handling this.";
-
-  if (/order|track/i.test(text)) {
-    reply = "Please share your order number.";
-  }
+  let reply = getBotReply(text);
 
   await sendMessage(appId, conversationId, reply);
 
-  res.status(200).end();
+  return res.status(200).end();
 }
 
-/* helpers */
+/* ================= HELPERS ================= */
+
+function getBotReply(text = "") {
+  if (/order|track/i.test(text)) {
+    return "Please share your order number.";
+  }
+
+  if (/refund/i.test(text)) {
+    return "I can help with refunds. Please share your order number.";
+  }
+
+  return "Hi, how can I help you today?";
+}
 
 async function acceptControl(appId, conversationId) {
   await fetch(
