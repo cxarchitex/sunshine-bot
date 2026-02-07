@@ -16,7 +16,6 @@ export default async function handler(req, res) {
 
   try {
     const { session_id, message } = req.body || {};
-
     if (!session_id || !message) {
       return res.status(400).json({ error: "Missing session_id or message" });
     }
@@ -28,11 +27,11 @@ export default async function handler(req, res) {
       sessionConversationMap.set(session_id, conversationId);
     }
 
-    await sendMessageToConversation(conversationId, message, "user");
+    await sendMessage(conversationId, message, "user");
 
     const reply = getBotReply(message);
 
-    await sendMessageToConversation(conversationId, reply, "bot");
+    await sendMessage(conversationId, reply, "bot");
 
     return res.status(200).json({ reply });
   } catch (err) {
@@ -76,14 +75,13 @@ async function createConversation() {
   const data = await response.json();
 
   if (!response.ok || !data?.conversation?.id) {
-    console.error("Sunshine createConversation failed:", data);
     throw new Error("Failed to create Sunshine conversation");
   }
 
   return data.conversation.id;
 }
 
-async function sendMessageToConversation(conversationId, text, sender) {
+async function sendMessage(conversationId, text, sender) {
   await fetch(
     `https://api.smooch.io/v2/conversations/${conversationId}/messages`,
     {
