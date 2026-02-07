@@ -19,5 +19,6 @@
   "homepage": "https://github.com/zenj-pro/sunshine-bot#readme",
   "dependencies": {
     "axios": "^1.13.4"
+    "jsonwebtoken": "^9.0.2"
   }
 }
