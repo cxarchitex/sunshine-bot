@@ -1,121 +1,79 @@
-// In-memory session → conversation mapping
-// (OK for now, can be replaced with Redis/DB later)
-const sessionConversationMap = new Map();
-
-export default async function handler(req, res) {
-  // ---- CORS (required for Shopify -> Vercel) ----
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
-  // Handle preflight
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
-
-  if (req.method !== "POST") {
-    return res.status(405).end();
-  }
-
-  try {
-    const { session_id, message } = req.body || {};
-
-    if (!session_id || !message) {
-      return res.status(400).json({
-        error: "Missing session_id or message",
-      });
+document.addEventListener("DOMContentLoaded", function () {
+  function getSessionId() {
+    let id = localStorage.getItem("chat_session_id");
+    if (!id) {
+      id = crypto.randomUUID();
+      localStorage.setItem("chat_session_id", id);
     }
-
-    // Get or create Sunshine conversation
-    let conversationId = sessionConversationMap.get(session_id);
-
-    if (!conversationId) {
-      conversationId = await createConversation();
-      sessionConversationMap.set(session_id, conversationId);
-    }
-
-    // Send user message into Sunshine
-    await sendMessageToConversation(conversationId, message, "user");
-
-    // Bot logic (simple for now)
-    const reply = getBotReply(message);
-
-    // Send bot reply into Sunshine
-    await sendMessageToConversation(conversationId, reply, "bot");
-
-    // Respond back to frontend
-    return res.status(200).json({ reply });
-  } catch (err) {
-    console.error("CHAT MESSAGE ERROR:", err);
-    return res.status(500).json({
-      error: "Internal server error",
-    });
-  }
-}
-
-/* ================= HELPERS ================= */
-
-function getBotReply(text = "") {
-  if (/order|track/i.test(text)) {
-    return "Please share your order number.";
+    return id;
   }
 
-  if (/refund/i.test(text)) {
-    return "I can help with refunds. Please share your order number.";
-  }
+  const sessionId = getSessionId();
 
-  return "Hi 👋 How can I help you today?";
-}
+  const bubble = document.getElementById("chat-bubble");
+  const widget = document.getElementById("chat-widget");
+  const closeBtn = document.getElementById("chat-close");
+  const input = document.getElementById("chat-input");
+  const sendBtn = document.getElementById("chat-send");
+  const messages = document.getElementById("chat-messages");
 
-async function createConversation() {
-  const response = await fetch("https://api.smooch.io/v2/conversations", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization:
-        "Basic " +
-        Buffer.from(
-          `${process.env.SUNSHINE_KEY_ID}:${process.env.SUNSHINE_KEY_SECRET}`
-        ).toString("base64"),
-    },
-    body: JSON.stringify({
-      type: "personal",
-      participants: [{ role: "user" }],
-    }),
+  if (!bubble || !widget) return;
+
+  bubble.addEventListener("click", () => {
+    widget.classList.remove("chat-hidden");
+    setTimeout(() => widget.classList.add("chat-visible"), 10);
+    bubble.style.display = "none";
+    input.focus();
   });
 
-  const data = await response.json();
+  closeBtn.addEventListener("click", () => {
+    widget.classList.remove("chat-visible");
+    setTimeout(() => widget.classList.add("chat-hidden"), 200);
+    bubble.style.display = "flex";
+  });
 
-  if (!data?.conversation?.id) {
-    throw new Error("Failed to create Sunshine conversation");
+  function addMessage(role, text) {
+    const div = document.createElement("div");
+    div.className = role;
+    div.textContent = text;
+    messages.appendChild(div);
+    messages.scrollTop = messages.scrollHeight;
   }
 
-  return data.conversation.id;
-}
+  async function sendMessage() {
+    const text = input.value.trim();
+    if (!text) return;
 
-async function sendMessageToConversation(conversationId, text, sender) {
-  await fetch(
-    `https://api.smooch.io/v2/conversations/${conversationId}/messages`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization:
-          "Basic " +
-          Buffer.from(
-            `${process.env.SUNSHINE_KEY_ID}:${process.env.SUNSHINE_KEY_SECRET}`
-          ).toString("base64"),
-      },
-      body: JSON.stringify({
-        author:
-          sender === "bot"
-            ? { type: "business" }
-            : { type: "user" },
-        content: {
-          type: "text",
-          text,
-        },
-      }),
+    input.value = "";
+    addMessage("user", text);
+
+    try {
+      const res = await fetch(
+        "https://YOUR-VERCEL-PROJECT.vercel.app/api/chat-message",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            session_id: sessionId,
+            message: text
+          })
+        }
+      );
+
+      const data = await res.json();
+      if (data.reply) {
+        addMessage("bot", data.reply);
+      }
+    } catch (err) {
+      addMessage("bot", "Something went wrong. Please try again.");
     }
-  );
-}
+  }
+
+  sendBtn.addEventListener("click", sendMessage);
+
+  input.addEventListener("keydown", e => {
+    if (e.key === "Enter") {
+      sendMessage();
+    }
+  });
+});
