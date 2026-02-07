@@ -12,7 +12,6 @@ export default async function handler(req, res) {
     return res.status(200).end();
   }
 
-  // Take control once per conversation
   await acceptControl(appId, conversationId);
 
   if (!message || message.author?.type !== "user") {
@@ -22,25 +21,15 @@ export default async function handler(req, res) {
   const text = message.content?.text?.trim();
   console.log("USER MESSAGE (Zendesk):", text);
 
-  let reply = getBotReply(text);
+  let reply = "Hi 👋 How can I help you today?";
+
+  if (/order|track/i.test(text)) {
+    reply = "Please share your order number.";
+  }
 
   await sendMessage(appId, conversationId, reply);
 
-  return res.status(200).end();
-}
-
-/* ================= HELPERS ================= */
-
-function getBotReply(text = "") {
-  if (/order|track/i.test(text)) {
-    return "Please share your order number.";
-  }
-
-  if (/refund/i.test(text)) {
-    return "I can help with refunds. Please share your order number.";
-  }
-
-  return "Hi, how can I help you today?";
+  res.status(200).end();
 }
 
 async function acceptControl(appId, conversationId) {
@@ -53,8 +42,8 @@ async function acceptControl(appId, conversationId) {
           "Basic " +
           Buffer.from(
             `${process.env.SUNSHINE_KEY_ID}:${process.env.SUNSHINE_KEY_SECRET}`
-          ).toString("base64"),
-      },
+          ).toString("base64")
+      }
     }
   );
 }
@@ -70,12 +59,12 @@ async function sendMessage(appId, conversationId, text) {
           "Basic " +
           Buffer.from(
             `${process.env.SUNSHINE_KEY_ID}:${process.env.SUNSHINE_KEY_SECRET}`
-          ).toString("base64"),
+          ).toString("base64")
       },
       body: JSON.stringify({
         author: { type: "business" },
-        content: { type: "text", text },
-      }),
+        content: { type: "text", text }
+      })
     }
   );
 }
