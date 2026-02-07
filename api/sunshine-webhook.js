@@ -1,85 +1,40 @@
-// /api/sunshine-webhook.js
-
 export default async function handler(req, res) {
-  try {
-    const body = req.body || {};
+  const body = req.body || {};
 
-    const trigger = body.trigger;
-    const appId = body?.app?.id;
-    const conversationId = body?.conversation?.id;
-    const message = body?.messages?.[0];
+  const trigger = body.trigger;
+  const appId = body?.app?.id;
+  const conversationId = body?.conversation?.id;
+  const message = body?.messages?.[0];
 
-    console.log(
-      "SUNSHINE EVENT:",
-      trigger,
-      appId,
-      conversationId
-    );
+  console.log("SUNSHINE EVENT:", trigger, appId, conversationId);
 
-    // Ignore non-conversation events
-    if (!appId || !conversationId) {
-      return res.status(200).end();
-    }
-
-    // ✅ STEP 1: ACCEPT SWITCHBOARD CONTROL (CRITICAL)
-    await acceptControl(appId, conversationId);
-    console.log("CONTROL ACCEPTED:", conversationId);
-
-    // Only respond to real user messages
-    if (!message || message.author?.type !== "user") {
-      return res.status(200).end();
-    }
-
-    const userText = message.content?.text?.trim();
-    console.log("USER MESSAGE:", userText);
-
-    let reply = null;
-
-    // Intent: order tracking
-    if (/order|track|tracking/i.test(userText)) {
-      reply = "Sure. Please share your order number.";
-    }
-
-    // Order number handling
-    else if (/^#?\d{4,}$/.test(userText)) {
-      const orderNumber = userText.replace("#", "");
-      const order = await getShopifyOrder(orderNumber);
-
-      if (!order) {
-        reply =
-          `Sorry, I could not find order ${orderNumber}. ` +
-          `Please double-check the number or ask for a human agent.`;
-      } else {
-        const fulfillment = order.fulfillments?.[0];
-        const tracking = fulfillment?.tracking_numbers?.[0];
-
-        if (tracking) {
-          reply =
-            `Order #${order.order_number} has shipped.\n` +
-            `Tracking number: ${tracking}`;
-        } else {
-          reply =
-            `Order #${order.order_number} is being processed.\n` +
-            `Tracking details will be shared once it ships.`;
-        }
-      }
-    }
-
-    // Send reply if we have one
-    if (reply) {
-      await sendMessage(appId, conversationId, reply);
-    }
-
+  if (!appId || !conversationId) {
     return res.status(200).end();
-  } catch (error) {
-    console.error("SUNSHINE ERROR:", error);
-    return res.status(500).end();
   }
+
+  // Take control once per conversation
+  await acceptControl(appId, conversationId);
+
+  if (!message || message.author?.type !== "user") {
+    return res.status(200).end();
+  }
+
+  const text = message.content?.text?.trim();
+  console.log("USER MESSAGE:", text);
+
+  let reply = "Got it. I’m handling this.";
+
+  if (/order|track/i.test(text)) {
+    reply = "Please share your order number.";
+  }
+
+  await sendMessage(appId, conversationId, reply);
+
+  res.status(200).end();
 }
 
-/* ---------------- HELPERS ---------------- */
+/* helpers */
 
-// ✅ CORRECT SWITCHBOARD ENDPOINT
 async function acceptControl(appId, conversationId) {
   await fetch(
     `https://api.smooch.io/v2/apps/${appId}/conversations/${conversationId}/switchboard/accept`,
@@ -115,20 +70,4 @@ async function sendMessage(appId, conversationId, text) {
       }),
     }
   );
-}
-
-async function getShopifyOrder(orderNumber) {
-  const url =
-    `https://${process.env.SHOPIFY_STORE_DOMAIN}` +
-    `/admin/api/2024-01/orders.json?name=${orderNumber}&status=any`;
-
-  const response = await fetch(url, {
-    headers: {
-      "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN,
-      "Content-Type": "application/json",
-    },
-  });
-
-  const data = await response.json();
-  return data?.orders?.[0];
 }
