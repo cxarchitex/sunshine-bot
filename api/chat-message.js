@@ -1,79 +1,105 @@
-document.addEventListener("DOMContentLoaded", function () {
-  function getSessionId() {
-    let id = localStorage.getItem("chat_session_id");
-    if (!id) {
-      id = crypto.randomUUID();
-      localStorage.setItem("chat_session_id", id);
-    }
-    return id;
+const sessionConversationMap = new Map();
+
+export default async function handler(req, res) {
+  // CORS
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
   }
 
-  const sessionId = getSessionId();
-
-  const bubble = document.getElementById("chat-bubble");
-  const widget = document.getElementById("chat-widget");
-  const closeBtn = document.getElementById("chat-close");
-  const input = document.getElementById("chat-input");
-  const sendBtn = document.getElementById("chat-send");
-  const messages = document.getElementById("chat-messages");
-
-  if (!bubble || !widget) return;
-
-  bubble.addEventListener("click", () => {
-    widget.classList.remove("chat-hidden");
-    setTimeout(() => widget.classList.add("chat-visible"), 10);
-    bubble.style.display = "none";
-    input.focus();
-  });
-
-  closeBtn.addEventListener("click", () => {
-    widget.classList.remove("chat-visible");
-    setTimeout(() => widget.classList.add("chat-hidden"), 200);
-    bubble.style.display = "flex";
-  });
-
-  function addMessage(role, text) {
-    const div = document.createElement("div");
-    div.className = role;
-    div.textContent = text;
-    messages.appendChild(div);
-    messages.scrollTop = messages.scrollHeight;
+  if (req.method !== "POST") {
+    return res.status(405).end();
   }
 
-  async function sendMessage() {
-    const text = input.value.trim();
-    if (!text) return;
+  try {
+    const { session_id, message } = req.body || {};
 
-    input.value = "";
-    addMessage("user", text);
-
-    try {
-      const res = await fetch(
-        "https://YOUR-VERCEL-PROJECT.vercel.app/api/chat-message",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            session_id: sessionId,
-            message: text
-          })
-        }
-      );
-
-      const data = await res.json();
-      if (data.reply) {
-        addMessage("bot", data.reply);
-      }
-    } catch (err) {
-      addMessage("bot", "Something went wrong. Please try again.");
+    if (!session_id || !message) {
+      return res.status(400).json({ error: "Missing session_id or message" });
     }
+
+    let conversationId = sessionConversationMap.get(session_id);
+
+    if (!conversationId) {
+      conversationId = await createConversation();
+      sessionConversationMap.set(session_id, conversationId);
+    }
+
+    await sendMessageToConversation(conversationId, message, "user");
+
+    const reply = getBotReply(message);
+
+    await sendMessageToConversation(conversationId, reply, "bot");
+
+    return res.status(200).json({ reply });
+  } catch (err) {
+    console.error("CHAT MESSAGE ERROR:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+}
+
+/* helpers */
+
+function getBotReply(text = "") {
+  if (/order|track/i.test(text)) {
+    return "Please share your order number.";
+  }
+  if (/refund/i.test(text)) {
+    return "I can help with refunds. Please share your order number.";
+  }
+  return "Hi 👋 How can I help you today?";
+}
+
+async function createConversation() {
+  const response = await fetch(
+    `https://api.smooch.io/v2/apps/${process.env.SUNSHINE_APP_ID}/conversations`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization:
+          "Basic " +
+          Buffer.from(
+            `${process.env.SUNSHINE_KEY_ID}:${process.env.SUNSHINE_KEY_SECRET}`
+          ).toString("base64"),
+      },
+      body: JSON.stringify({
+        type: "personal",
+        participants: [{ role: "user" }],
+      }),
+    }
+  );
+
+  const data = await response.json();
+
+  if (!response.ok || !data?.conversation?.id) {
+    console.error("Sunshine createConversation failed:", data);
+    throw new Error("Failed to create Sunshine conversation");
   }
 
-  sendBtn.addEventListener("click", sendMessage);
+  return data.conversation.id;
+}
 
-  input.addEventListener("keydown", e => {
-    if (e.key === "Enter") {
-      sendMessage();
+async function sendMessageToConversation(conversationId, text, sender) {
+  await fetch(
+    `https://api.smooch.io/v2/conversations/${conversationId}/messages`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization:
+          "Basic " +
+          Buffer.from(
+            `${process.env.SUNSHINE_KEY_ID}:${process.env.SUNSHINE_KEY_SECRET}`
+          ).toString("base64"),
+      },
+      body: JSON.stringify({
+        author: sender === "bot" ? { type: "business" } : { type: "user" },
+        content: { type: "text", text },
+      }),
     }
-  });
-});
+  );
+}
