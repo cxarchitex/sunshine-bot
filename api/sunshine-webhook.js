@@ -1,5 +1,4 @@
 // /api/sunshine-webhook.js
-// Uses native fetch (Node 18+, Vercel default)
 
 export default async function handler(req, res) {
   try {
@@ -10,18 +9,23 @@ export default async function handler(req, res) {
     const conversationId = body?.conversation?.id;
     const message = body?.messages?.[0];
 
-    console.log("SUNSHINE EVENT:", trigger, appId, conversationId);
+    console.log(
+      "SUNSHINE EVENT:",
+      trigger,
+      appId,
+      conversationId
+    );
 
-    // Ignore non-conversation pings
+    // Ignore non-conversation events
     if (!appId || !conversationId) {
       return res.status(200).end();
     }
 
-    // 🔑 STEP 1: TAKE CONTROL (CRITICAL)
+    // ✅ STEP 1: ACCEPT SWITCHBOARD CONTROL (CRITICAL)
     await acceptControl(appId, conversationId);
     console.log("CONTROL ACCEPTED:", conversationId);
 
-    // Only react to real user messages
+    // Only respond to real user messages
     if (!message || message.author?.type !== "user") {
       return res.status(200).end();
     }
@@ -31,12 +35,12 @@ export default async function handler(req, res) {
 
     let reply = null;
 
-    // STEP 2: INTENT — ORDER TRACKING
+    // Intent: order tracking
     if (/order|track|tracking/i.test(userText)) {
       reply = "Sure. Please share your order number.";
     }
 
-    // STEP 3: ORDER NUMBER HANDLING
+    // Order number handling
     else if (/^#?\d{4,}$/.test(userText)) {
       const orderNumber = userText.replace("#", "");
       const order = await getShopifyOrder(orderNumber);
@@ -61,23 +65,24 @@ export default async function handler(req, res) {
       }
     }
 
-    // STEP 4: SEND BOT REPLY (ONLY AFTER CONTROL)
+    // Send reply if we have one
     if (reply) {
       await sendMessage(appId, conversationId, reply);
     }
 
     return res.status(200).end();
   } catch (error) {
-    console.error("SUNSHINE WEBHOOK ERROR:", error);
+    console.error("SUNSHINE ERROR:", error);
     return res.status(500).end();
   }
 }
 
 /* ---------------- HELPERS ---------------- */
 
+// ✅ CORRECT SWITCHBOARD ENDPOINT
 async function acceptControl(appId, conversationId) {
   await fetch(
-    `https://api.smooch.io/v2/apps/${appId}/conversations/${conversationId}/acceptControl`,
+    `https://api.smooch.io/v2/apps/${appId}/conversations/${conversationId}/switchboard/accept`,
     {
       method: "POST",
       headers: {
