@@ -1,36 +1,31 @@
 import jwt from "jsonwebtoken";
 
 export default function handler(req, res) {
-  // ---- CORS (required for Shopify) ----
+  // ✅ CORS HEADERS (THIS IS WHAT YOU ARE MISSING)
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
 
-  // ---- Env vars ----
-  const appId = process.env.SUNSHINE_APP_ID;
-  const keyId = process.env.SUNSHINE_KEY_ID;
-  const secret = process.env.SUNSHINE_SECRET;
+  try {
+    const token = jwt.sign(
+      {
+        scope: "app",
+        userId: "shopify-anon-user"
+      },
+      process.env.SUNSHINE_APP_SECRET,
+      {
+        issuer: process.env.SUNSHINE_APP_ID,
+        expiresIn: "1h"
+      }
+    );
 
-  if (!appId || !keyId || !secret) {
-    return res.status(500).json({ error: "Missing Sunshine env vars" });
+    return res.status(200).json({ jwt: token });
+  } catch (err) {
+    console.error("JWT error:", err);
+    return res.status(500).json({ error: "JWT generation failed" });
   }
-
-  // ---- JWT payload ----
-  const payload = {
-    scope: "app",
-    appId,
-    userId: "anon_" + Date.now()
-  };
-
-  const token = jwt.sign(payload, secret, {
-    algorithm: "HS256",
-    expiresIn: "1h",
-    header: { kid: keyId }
-  });
-
-  return res.status(200).json({ jwt: token });
 }
