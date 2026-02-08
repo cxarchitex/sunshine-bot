@@ -1,7 +1,8 @@
+import fetch from "node-fetch";
+
+const sessions = {};
+
 export default async function handler(req, res) {
-  /* --------------------
-     CORS
-  -------------------- */
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -10,138 +11,103 @@ export default async function handler(req, res) {
     return res.status(200).end();
   }
 
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
-  }
+  const { message, conversationId, customer } = req.body;
 
-  /* --------------------
-     Session memory (in-memory)
-     Note: fine for demo / POC
-  -------------------- */
-  global.sessions ||= {};
-  const { message, conversationId } = req.body;
-
-  if (!conversationId || !message) {
-    return res.status(400).json({ reply: "Invalid request." });
+  if (!conversationId) {
+    return res.status(400).json({ reply: "Missing conversation id." });
   }
 
   const session =
-    global.sessions[conversationId] ||= {
-      intent: null,
+    sessions[conversationId] ||
+    (sessions[conversationId] = {
       email: null
-    };
+    });
 
   const text = message.toLowerCase();
 
-  /* --------------------
-     INTENT DETECTION
-  -------------------- */
-  const isTrackIntent =
-    /track|where.*order|order status|my order/.test(text);
-
-  const emailMatch = message.match(
-    /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i
-  );
-
-  /* --------------------
-     STEP 1: Detect intent
-  -------------------- */
-  if (isTrackIntent && !session.intent) {
-    session.intent = "TRACK_ORDER";
+  // ✅ auto-hydrate email for logged-in users
+  if (!session.email && customer?.loggedIn && customer?.email) {
+    session.email = customer.email;
   }
 
-  /* --------------------
-     STEP 2: Capture email
-  -------------------- */
-  if (emailMatch) {
-    session.email = emailMatch[0];
+  // 🔎 intent detection
+  const wantsTracking =
+    text.includes("track") ||
+    text.includes("where is") ||
+    text.includes("order status");
+
+  const wantsList =
+    text.includes("list") ||
+    text.includes("my orders") ||
+    text.includes("past orders");
+
+  // 📧 ask for email only if needed
+  if ((wantsTracking || wantsList) && !session.email) {
+    return res.json({
+      reply: "Please share the email used for your orders."
+    });
   }
 
-  /* --------------------
-     STEP 3: Handle TRACK ORDER
-  -------------------- */
-  if (session.intent === "TRACK_ORDER") {
-    if (!session.email) {
+  // 📦 TRACK ORDER
+  if (wantsTracking) {
+    const order = await getLatestActiveOrder(session.email);
+
+    if (!order) {
       return res.json({
-        reply: "Please share the email used for your order."
+        reply:
+          "You don’t have any active orders right now. Would you like to see your past orders?"
       });
     }
 
-    try {
-      const orders = await fetchOrdersByEmail(session.email);
+    return res.json({
+      reply: `Your order #${order.name} is currently ${order.fulfillment_status || "processing"}. Expected delivery by ${order.estimated_delivery || "soon"}.`
+    });
+  }
 
-      if (!orders.length) {
-        return res.json({
-          reply:
-            "I couldn’t find any orders with that email. Please double-check it."
-        });
-      }
+  // 📜 LIST ORDERS
+  if (wantsList) {
+    const orders = await listOrders(session.email);
 
-      const activeOrder = orders.find(
+    if (!orders.length) {
+      return res.json({
+        reply: "I couldn’t find any orders for this email."
+      });
+    }
+
+    const summary = orders
+      .map(
         (o) =>
-          o.financial_status !== "refunded" &&
-          o.fulfillment_status !== "fulfilled" &&
-          o.cancelled_at === null
-      );
+          `#${o.name} • ${o.financial_status} • ${o.fulfillment_status || "processing"}`
+      )
+      .join("\n");
 
-      if (!activeOrder) {
-        return res.json({
-          reply:
-            "You don’t have any active orders right now. Would you like to see your past orders?"
-        });
-      }
-
-      const status =
-        activeOrder.fulfillment_status || activeOrder.financial_status;
-
-      const eta =
-        activeOrder.fulfillments?.[0]?.estimated_delivery_at ||
-        "soon";
-
-      return res.json({
-        reply: `Your order #${activeOrder.name} is currently **${status}**. Expected delivery: **${eta}**.`
-      });
-    } catch (err) {
-      console.error("Order fetch error:", err);
-      return res.json({
-        reply: "Sorry, I couldn’t fetch your order right now."
-      });
-    }
+    return res.json({
+      reply: `Here are your recent orders:\n${summary}`
+    });
   }
 
-  /* --------------------
-     DEFAULT FALLBACK
-  -------------------- */
+  // 📧 capture email if user typed it
+  if (!session.email && message.includes("@")) {
+    session.email = message.trim();
+    return res.json({
+      reply: "Thanks. What would you like to do next?"
+    });
+  }
+
   return res.json({
     reply:
-      "Hi 👋 I can help with tracking orders, listing orders, or checking products."
+      "I can help with tracking orders, listing orders, or checking products."
   });
 }
 
-/* ==========================
-   SHOPIFY API HELPERS
-========================== */
+/* ---------- Shopify helpers ---------- */
 
-async function fetchOrdersByEmail(email) {
-  const SHOP = process.env.SHOPIFY_STORE_DOMAIN;
-  const TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
-  const VERSION = "2024-01";
+async function listOrders(email) {
+  // Replace with real Shopify Admin API
+  return [];
+}
 
-  const url = `https://${SHOP}/admin/api/${VERSION}/orders.json?email=${encodeURIComponent(
-    email
-  )}&status=any&limit=10`;
-
-  const res = await fetch(url, {
-    headers: {
-      "X-Shopify-Access-Token": TOKEN,
-      "Content-Type": "application/json"
-    }
-  });
-
-  if (!res.ok) {
-    throw new Error("Shopify API error");
-  }
-
-  const data = await res.json();
-  return data.orders || [];
+async function getLatestActiveOrder(email) {
+  // Replace with real Shopify Admin API
+  return null;
 }
