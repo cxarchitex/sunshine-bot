@@ -1,79 +1,70 @@
 const sessionConversationMap = new Map();
+const sessionState = new Map();
 
 export default async function handler(req, res) {
-  // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
-
-  if (req.method !== "POST") {
-    return res.status(405).end();
-  }
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") return res.status(405).end();
 
   const { session_id, message } = req.body || {};
-
   if (!session_id || !message) {
-    return res.status(400).json({ error: "Missing session_id or message" });
+    return res.status(400).json({ error: "Missing data" });
   }
 
-  try {
-    // Get or create Sunshine conversation
-    let conversationId = sessionConversationMap.get(session_id);
+  let conversationId = sessionConversationMap.get(session_id);
+  if (!conversationId) {
+    conversationId = await createConversation(session_id);
+    sessionConversationMap.set(session_id, conversationId);
+  }
 
-    if (!conversationId) {
-      conversationId = await createConversation(session_id);
-      sessionConversationMap.set(session_id, conversationId);
-    }
+  await sendMessage(conversationId, message, "user");
 
-    // Send user message to Sunshine
-    await sendMessage(conversationId, message, "user");
+  const text = message.toLowerCase().trim();
+  let state = sessionState.get(session_id) || {};
+  let reply;
 
-    // Bot logic
-    let reply;
+  const orderMatch = text.match(/\b\d{4,}\b/);
+  const orderNumber = orderMatch ? orderMatch[0] : null;
 
-    // Order number detected
-    if (/^\d{4,}$/.test(message.trim())) {
-      const order = await fetchOrderByNumber(message.trim());
-
-      if (!order) {
-        reply = `I couldn’t find an order with number ${message}. Please double-check the order number.`;
-      } else {
-        reply =
-          `📦 Order ${order.name}\n` +
-          `Status: ${order.fulfillmentStatus || "Not fulfilled"}\n` +
-          `Payment: ${order.financialStatus}`;
-      }
-    }
-    // Order intent
-    else if (/track|order status|where is my order/i.test(message)) {
+  if (/track|order status|where is my order/.test(text)) {
+    state.flow = "track_order";
+    if (orderNumber) {
+      reply = await handleOrderLookup(orderNumber);
+      state.flow = null;
+    } else {
       reply = "Sure 🙂 Please share your order number.";
     }
-    // Refund intent
-    else if (/refund|return/i.test(message)) {
-      reply = "I can help with refunds. Please share your order number.";
-    }
-    // Default
-    else {
-      reply = "Hi 👋 How can I help you today?";
-    }
-
-    // Send bot reply
-    await sendMessage(conversationId, reply, "bot");
-
-    return res.status(200).json({ reply });
-  } catch (err) {
-    console.error("CHAT MESSAGE ERROR:", err);
-    return res.status(500).json({ error: "Internal server error" });
+  } else if (state.flow === "track_order" && orderNumber) {
+    reply = await handleOrderLookup(orderNumber);
+    state.flow = null;
+  } else if (/list my orders|my orders/.test(text)) {
+    reply =
+      "For security reasons, I can help with a specific order.\n" +
+      "Please share your order number.";
+  } else {
+    reply =
+      "Hi 👋 I can help you track an order, check its status, or assist with returns.";
   }
+
+  sessionState.set(session_id, state);
+  await sendMessage(conversationId, reply, "bot");
+  res.status(200).json({ reply });
 }
 
-/* ---------------- HELPERS ---------------- */
+async function handleOrderLookup(orderNumber) {
+  const order = await fetchOrderByNumber(orderNumber);
+  if (!order) {
+    return `I couldn’t find an order with number ${orderNumber}. Please double-check it.`;
+  }
+  return (
+    `📦 Order ${order.name}\n` +
+    `Status: ${order.fulfillmentStatus || "Not fulfilled"}\n` +
+    `Payment: ${order.financialStatus}`
+  );
+}
 
-// Shopify order lookup (Admin GraphQL API)
 async function fetchOrderByNumber(orderNumber) {
   const query = `
     {
@@ -105,9 +96,7 @@ async function fetchOrderByNumber(orderNumber) {
   return json?.data?.orders?.edges?.[0]?.node || null;
 }
 
-// Create Sunshine user + conversation
 async function createConversation(sessionId) {
-  // 1. Upsert user
   await fetch(
     `https://api.smooch.io/v2/apps/${process.env.SUNSHINE_APP_ID}/users`,
     {
@@ -120,13 +109,10 @@ async function createConversation(sessionId) {
             `${process.env.SUNSHINE_KEY_ID}:${process.env.SUNSHINE_KEY_SECRET}`
           ).toString("base64")
       },
-      body: JSON.stringify({
-        externalId: sessionId
-      })
+      body: JSON.stringify({ externalId: sessionId })
     }
   );
 
-  // 2. Create conversation
   const res = await fetch(
     `https://api.smooch.io/v2/apps/${process.env.SUNSHINE_APP_ID}/conversations`,
     {
@@ -141,27 +127,15 @@ async function createConversation(sessionId) {
       },
       body: JSON.stringify({
         type: "personal",
-        participants: [
-          {
-            role: "user",
-            userExternalId: sessionId
-          }
-        ]
+        participants: [{ role: "user", userExternalId: sessionId }]
       })
     }
   );
 
   const json = await res.json();
-
-  if (!res.ok || !json?.conversation?.id) {
-    console.error("Sunshine error:", json);
-    throw new Error("Failed to create Sunshine conversation");
-  }
-
   return json.conversation.id;
 }
 
-// Send message to Sunshine
 async function sendMessage(conversationId, text, sender) {
   await fetch(
     `https://api.smooch.io/v2/conversations/${conversationId}/messages`,
@@ -177,10 +151,7 @@ async function sendMessage(conversationId, text, sender) {
       },
       body: JSON.stringify({
         author: sender === "bot" ? { type: "business" } : { type: "user" },
-        content: {
-          type: "text",
-          text
-        }
+        content: { type: "text", text }
       })
     }
   );
