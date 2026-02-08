@@ -1,7 +1,7 @@
 export default async function handler(req, res) {
-  // ---------------------------
-  // CORS (MUST be first)
-  // ---------------------------
+  /* --------------------
+     CORS
+  -------------------- */
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -14,170 +14,132 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  // ---------------------------
-  // Request payload
-  // ---------------------------
-  const { message, conversationId, customer } = req.body || {};
+  /* --------------------
+     Session memory (in-memory)
+     Note: fine for demo / POC
+  -------------------- */
+  global.sessions ||= {};
+  const { message, conversationId } = req.body;
 
-  if (!message || !conversationId) {
+  if (!conversationId || !message) {
     return res.status(400).json({ reply: "Invalid request." });
   }
 
-  // ---------------------------
-  // In-memory session store
-  // ---------------------------
-  global.sessions = global.sessions || {};
-
   const session =
-    global.sessions[conversationId] || {
+    global.sessions[conversationId] ||= {
       intent: null,
-      email: null,
-      awaitingOrderNumber: false
+      email: null
     };
-
-  global.sessions[conversationId] = session;
 
   const text = message.toLowerCase();
 
-  // ---------------------------
-  // Intent detection
-  // ---------------------------
-  if (
-    text.includes("track") ||
-    text.includes("where is") ||
-    text.includes("order status") ||
-    text.includes("my order")
-  ) {
+  /* --------------------
+     INTENT DETECTION
+  -------------------- */
+  const isTrackIntent =
+    /track|where.*order|order status|my order/.test(text);
+
+  const emailMatch = message.match(
+    /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i
+  );
+
+  /* --------------------
+     STEP 1: Detect intent
+  -------------------- */
+  if (isTrackIntent && !session.intent) {
     session.intent = "TRACK_ORDER";
   }
 
-  // ---------------------------
-  // Logged-in customer handling
-  // ---------------------------
-  if (customer?.loggedIn && customer?.email) {
-    session.email = customer.email;
+  /* --------------------
+     STEP 2: Capture email
+  -------------------- */
+  if (emailMatch) {
+    session.email = emailMatch[0];
   }
 
-  // ---------------------------
-  // Ask for email if needed
-  // ---------------------------
-  if (session.intent === "TRACK_ORDER" && !session.email) {
-    const emailMatch = message.match(/\S+@\S+\.\S+/);
-
-    if (!emailMatch) {
+  /* --------------------
+     STEP 3: Handle TRACK ORDER
+  -------------------- */
+  if (session.intent === "TRACK_ORDER") {
+    if (!session.email) {
       return res.json({
         reply: "Please share the email used for your order."
       });
     }
 
-    session.email = emailMatch[0];
-  }
+    try {
+      const orders = await fetchOrdersByEmail(session.email);
 
-  // ---------------------------
-  // Fetch orders from Shopify
-  // ---------------------------
-  let orders = [];
-  try {
-    orders = await fetchOrdersByEmail(session.email);
-  } catch (err) {
-    console.error("Shopify error:", err);
-    return res.json({
-      reply: "Sorry, I couldn’t fetch your orders right now."
-    });
-  }
+      if (!orders.length) {
+        return res.json({
+          reply:
+            "I couldn’t find any orders with that email. Please double-check it."
+        });
+      }
 
-  if (!orders.length) {
-    return res.json({
-      reply: "I couldn’t find any orders for that email."
-    });
-  }
+      const activeOrder = orders.find(
+        (o) =>
+          o.financial_status !== "refunded" &&
+          o.fulfillment_status !== "fulfilled" &&
+          o.cancelled_at === null
+      );
 
-  // ---------------------------
-  // Active orders logic
-  // ---------------------------
-  const activeOrders = orders.filter(o =>
-    !o.cancelled_at &&
-    (o.fulfillment_status === null ||
-      o.fulfillment_status === "unfulfilled" ||
-      o.fulfillment_status === "partial")
-  );
+      if (!activeOrder) {
+        return res.json({
+          reply:
+            "You don’t have any active orders right now. Would you like to see your past orders?"
+        });
+      }
 
-  if (!activeOrders.length) {
-    return res.json({
-      reply:
-        "You don’t have any active orders right now. Would you like to see your past orders?"
-    });
-  }
+      const status =
+        activeOrder.fulfillment_status || activeOrder.financial_status;
 
-  if (activeOrders.length > 1 && !session.awaitingOrderNumber) {
-    session.awaitingOrderNumber = true;
-    return res.json({
-      reply:
-        "I found more than one active order. Please tell me the order number you want to track."
-    });
-  }
+      const eta =
+        activeOrder.fulfillments?.[0]?.estimated_delivery_at ||
+        "soon";
 
-  // ---------------------------
-  // Order number selection
-  // ---------------------------
-  let order = activeOrders[0];
-
-  if (session.awaitingOrderNumber) {
-    const num = message.replace("#", "").trim();
-    const matched = activeOrders.find(
-      o => String(o.order_number) === num
-    );
-
-    if (!matched) {
       return res.json({
-        reply: "I couldn’t find that order number. Please try again."
+        reply: `Your order #${activeOrder.name} is currently **${status}**. Expected delivery: **${eta}**.`
+      });
+    } catch (err) {
+      console.error("Order fetch error:", err);
+      return res.json({
+        reply: "Sorry, I couldn’t fetch your order right now."
       });
     }
-
-    order = matched;
-    session.awaitingOrderNumber = false;
   }
 
-  // ---------------------------
-  // Build response
-  // ---------------------------
-  const fulfillment = order.fulfillments?.[0];
-  const trackingUrl = fulfillment?.tracking_url;
-
-  let reply = `Order #${order.order_number}\n`;
-
-  if (!order.fulfillment_status) {
-    reply += "Status: Being prepared for shipment.";
-  } else if (order.fulfillment_status === "partial") {
-    reply += "Status: Partially shipped.";
-  } else {
-    reply += "Status: Shipped.";
-  }
-
-  if (trackingUrl) {
-    reply += `\nTracking link: ${trackingUrl}`;
-  }
-
-  return res.json({ reply });
+  /* --------------------
+     DEFAULT FALLBACK
+  -------------------- */
+  return res.json({
+    reply:
+      "Hi 👋 I can help with tracking orders, listing orders, or checking products."
+  });
 }
 
-// ---------------------------
-// Shopify helper (Node 18+ fetch)
-// ---------------------------
+/* ==========================
+   SHOPIFY API HELPERS
+========================== */
+
 async function fetchOrdersByEmail(email) {
-  const url = `https://${process.env.SHOPIFY_STORE_DOMAIN}/admin/api/2024-01/orders.json?email=${encodeURIComponent(
+  const SHOP = process.env.SHOPIFY_STORE_DOMAIN;
+  const TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
+  const VERSION = "2024-01";
+
+  const url = `https://${SHOP}/admin/api/${VERSION}/orders.json?email=${encodeURIComponent(
     email
-  )}&status=any`;
+  )}&status=any&limit=10`;
 
   const res = await fetch(url, {
     headers: {
-      "X-Shopify-Access-Token": process.env.SHOPIFY_ADMINS_TOKEN,
+      "X-Shopify-Access-Token": TOKEN,
       "Content-Type": "application/json"
     }
   });
 
   if (!res.ok) {
-    throw new Error("Shopify request failed");
+    throw new Error("Shopify API error");
   }
 
   const data = await res.json();
