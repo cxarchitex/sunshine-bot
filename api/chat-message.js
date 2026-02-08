@@ -8,7 +8,7 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).end();
 
-  const { session_id, message } = req.body || {};
+  const { session_id, message, context } = req.body || {};
   if (!session_id || !message) {
     return res.status(400).json({ error: "Missing data" });
   }
@@ -28,24 +28,55 @@ export default async function handler(req, res) {
   const orderMatch = text.match(/\b\d{4,}\b/);
   const orderNumber = orderMatch ? orderMatch[0] : null;
 
-  if (/track|order status|where is my order/.test(text)) {
-    state.flow = "track_order";
+  /* PRIORITY 1: CART */
+  if (/cart/.test(text)) {
+    if (!context?.cart || context.cart.items.length === 0) {
+      reply = "Your cart is currently empty. Would you like help finding a product?";
+    } else {
+      const items = context.cart.items
+        .map(i => `• ${i.title} ×${i.quantity}`)
+        .join("\n");
+      reply =
+        `You currently have ${context.cart.items.length} item(s) in your cart:\n` +
+        `${items}\n\nWould you like help checking out or modifying your cart?`;
+    }
+  }
+
+  /* PRIORITY 2: PRODUCT */
+  else if (context?.product && /this|it|price|compatible|available/.test(text)) {
+    reply =
+      `You’re viewing ${context.product.title}.\n` +
+      `Price: ₹${context.product.price}\n` +
+      `Would you like compatibility details, delivery info, or to add it to your cart?`;
+  }
+
+  /* PRIORITY 3: ORDER TRACKING */
+  else if (/track|order status|where is my order/.test(text)) {
+    state.flow = "track";
     if (orderNumber) {
-      reply = await handleOrderLookup(orderNumber);
+      reply = await handleOrder(orderNumber);
       state.flow = null;
     } else {
       reply = "Sure 🙂 Please share your order number.";
     }
-  } else if (state.flow === "track_order" && orderNumber) {
-    reply = await handleOrderLookup(orderNumber);
+  }
+
+  else if (state.flow === "track" && orderNumber) {
+    reply = await handleOrder(orderNumber);
     state.flow = null;
-  } else if (/list my orders|my orders/.test(text)) {
+  }
+
+  /* PRIORITY 4: CANCELLATION */
+  else if (/cancel/.test(text)) {
+    state.flow = "cancel";
+    reply = "Please share your order number so I can check if it can be cancelled.";
+  }
+
+  /* FALLBACK */
+  else {
     reply =
-      "For security reasons, I can help with a specific order.\n" +
-      "Please share your order number.";
-  } else {
-    reply =
-      "Hi 👋 I can help you track an order, check its status, or assist with returns.";
+      "I can help with your cart, product details, or order tracking.\n" +
+      "What would you like to do?";
   }
 
   sessionState.set(session_id, state);
@@ -53,7 +84,7 @@ export default async function handler(req, res) {
   res.status(200).json({ reply });
 }
 
-async function handleOrderLookup(orderNumber) {
+async function handleOrder(orderNumber) {
   const order = await fetchOrderByNumber(orderNumber);
   if (!order) {
     return `I couldn’t find an order with number ${orderNumber}. Please double-check it.`;
@@ -61,7 +92,8 @@ async function handleOrderLookup(orderNumber) {
   return (
     `📦 Order ${order.name}\n` +
     `Status: ${order.fulfillmentStatus || "Not fulfilled"}\n` +
-    `Payment: ${order.financialStatus}`
+    `Payment: ${order.financialStatus}\n\n` +
+    `Would you like help with cancellation or returns?`
   );
 }
 
