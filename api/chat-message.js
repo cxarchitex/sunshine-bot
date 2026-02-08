@@ -1,19 +1,16 @@
 import fetch from "node-fetch";
 
-const SHOPIFY_DOMAIN = process.env.SHOPIFY_DOMAIN;
+const SHOPIFY_DOMAIN = process.env.SHOPIFY_STORE_DOMAIN;
 const SHOPIFY_ADMIN_TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
 const SHOPIFY_API_VERSION = "2024-01";
 
-// In-memory session store (OK for demo / Vercel edge)
 const sessions = new Map();
 
 function getSession(conversationId) {
   if (!sessions.has(conversationId)) {
     sessions.set(conversationId, {
       intent: null,
-      awaiting: null,
-      email: null,
-      orderNumber: null
+      email: null
     });
   }
   return sessions.get(conversationId);
@@ -21,7 +18,7 @@ function getSession(conversationId) {
 
 async function shopifyFetch(path) {
   const res = await fetch(
-    `https://${SHOPIFY_STORE_DOMAIN}/admin/api/${SHOPIFY_API_VERSION}/${path}`,
+    `https://${SHOPIFY_DOMAIN}/admin/api/${SHOPIFY_API_VERSION}/${path}`,
     {
       headers: {
         "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
@@ -39,6 +36,16 @@ async function shopifyFetch(path) {
 }
 
 export default async function handler(req, res) {
+  /* ---------------- CORS HEADERS ---------------- */
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  /* ---------------- PREFLIGHT ---------------- */
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
@@ -48,11 +55,10 @@ export default async function handler(req, res) {
     const text = message.toLowerCase();
     const session = getSession(conversationId);
 
-    /* ---------------- INTENT DETECTION ---------------- */
+    /* ---------- INTENTS ---------- */
 
-    if (/list.*order|my orders|show orders/.test(text)) {
+    if (/list.*order|my orders/.test(text)) {
       session.intent = "LIST_ORDERS";
-      session.awaiting = "EMAIL";
       sessions.set(conversationId, session);
 
       return res.json({
@@ -62,7 +68,6 @@ export default async function handler(req, res) {
 
     if (/track.*order|where.*order/.test(text)) {
       session.intent = "TRACK_ORDER";
-      session.awaiting = "ORDER_NUMBER";
       sessions.set(conversationId, session);
 
       return res.json({
@@ -70,7 +75,7 @@ export default async function handler(req, res) {
       });
     }
 
-    /* ---------------- EMAIL HANDLING ---------------- */
+    /* ---------- EMAIL ---------- */
 
     const emailMatch = message.match(
       /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i
@@ -78,7 +83,6 @@ export default async function handler(req, res) {
 
     if (emailMatch && session.intent === "LIST_ORDERS") {
       session.email = emailMatch[0];
-      session.awaiting = null;
       sessions.set(conversationId, session);
 
       const data = await shopifyFetch(
@@ -93,7 +97,7 @@ export default async function handler(req, res) {
         });
       }
 
-      const summary = data.orders
+      const orders = data.orders
         .map(
           (o) =>
             `• #${o.order_number} – ${o.financial_status}, ${
@@ -103,22 +107,19 @@ export default async function handler(req, res) {
         .join("\n");
 
       return res.json({
-        reply: `Here are your recent orders:\n${summary}`
+        reply: `Here are your recent orders:\n${orders}`
       });
     }
 
-    /* ---------------- ORDER NUMBER HANDLING ---------------- */
+    /* ---------- ORDER NUMBER ---------- */
 
-    const orderNumberMatch = message.match(/#?\d{3,}/);
+    const orderMatch = message.match(/#?\d{3,}/);
 
-    if (orderNumberMatch && session.intent === "TRACK_ORDER") {
-      const orderNumber = orderNumberMatch[0].replace("#", "");
-      session.orderNumber = orderNumber;
-      session.awaiting = null;
-      sessions.set(conversationId, session);
+    if (orderMatch && session.intent === "TRACK_ORDER") {
+      const number = orderMatch[0].replace("#", "");
 
       const data = await shopifyFetch(
-        `orders.json?name=%23${orderNumber}&status=any`
+        `orders.json?name=%23${number}&status=any`
       );
 
       if (!data.orders.length) {
@@ -127,27 +128,25 @@ export default async function handler(req, res) {
         });
       }
 
-      const order = data.orders[0];
+      const o = data.orders[0];
 
       return res.json({
-        reply: `Order #${order.order_number}\nPayment: ${
-          order.financial_status
-        }\nFulfillment: ${
-          order.fulfillment_status || "unfulfilled"
+        reply: `Order #${o.order_number}\nPayment: ${o.financial_status}\nFulfillment: ${
+          o.fulfillment_status || "unfulfilled"
         }`
       });
     }
 
-    /* ---------------- FALLBACK ---------------- */
+    /* ---------- FALLBACK ---------- */
 
     return res.json({
       reply:
         "Hi 👋 I can help with tracking orders, listing orders, or checking products."
     });
   } catch (err) {
-    console.error("Chat error:", err);
+    console.error(err);
     return res.status(500).json({
-      reply: "Something went wrong while checking your order."
+      reply: "Sorry, something went wrong."
     });
   }
 }
