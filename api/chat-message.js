@@ -1,106 +1,103 @@
-import { getOrdersByEmail } from './shopify';
-import { extractEmail } from './utils';
+// api/chat-message.js
+
+const sessions = new Map(); // in-memory session store (OK for now)
 
 export default async function handler(req, res) {
-  /* ===============================
-     CORS HEADERS (MUST BE FIRST)
-     =============================== */
-  res.setHeader('Access-Control-Allow-Origin', 'https://cx-demostore.myshopify.com');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  // --- CORS ---
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  if (req.method === 'OPTIONS') {
+  if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
 
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
-
   try {
-    const {
-      intent,
-      message,
-      conversationId,
-      metadata = {}
-    } = req.body;
+    const { message, conversationId } = req.body;
 
-    const customerEmail = metadata.customer_email || null;
+    if (!message || !conversationId) {
+      return res.status(400).json({ error: "Missing message or conversationId" });
+    }
 
-    /* ===============================
-       LIST ORDERS
-       =============================== */
-    if (intent === 'list_orders') {
-      if (!customerEmail) {
-        return res.json({
-          reply: 'Sure, please share the email used for your order.',
-          next_step: 'collect_email'
-        });
-      }
+    const text = message.toLowerCase().trim();
 
-      const orders = await getOrdersByEmail(customerEmail);
+    // Load or init session
+    const session = sessions.get(conversationId) || {
+      intent: null,
+      awaiting: null
+    };
 
-      if (!orders.length) {
-        return res.json({
-          reply: `I couldn’t find any orders for ${customerEmail}.`
-        });
-      }
+    // ---------- INTENT DETECTION ----------
+    const isTrackOrder =
+      text.includes("track") ||
+      text.includes("where is my order");
 
+    const isListOrders =
+      text.includes("list my orders") ||
+      text.includes("my orders");
+
+    const orderNumberMatch = text.match(/\b\d{3,}\b/); // simple numeric order id
+
+    // ---------- STATE HANDLING ----------
+
+    // User provided order number
+    if (session.awaiting === "ORDER_NUMBER" && orderNumberMatch) {
+      const orderNumber = orderNumberMatch[0];
+
+      session.awaiting = null;
+      sessions.set(conversationId, session);
+
+      // TODO: replace with Shopify fetch
       return res.json({
-        reply: formatOrders(orders)
+        reply: `✅ Order #${orderNumber} is currently *fulfilled* and on the way.`
       });
     }
 
-    /* ===============================
-       COLLECT EMAIL
-       =============================== */
-    if (intent === 'provide_email') {
-      const email = extractEmail(message);
-
-      if (!email) {
-        return res.json({
-          reply: 'Please enter a valid email address.'
-        });
-      }
-
-      const orders = await getOrdersByEmail(email);
+    // Track order intent
+    if (isTrackOrder) {
+      session.intent = "TRACK_ORDER";
+      session.awaiting = "ORDER_NUMBER";
+      sessions.set(conversationId, session);
 
       return res.json({
-        reply: orders.length
-          ? formatOrders(orders)
-          : `I couldn’t find any orders for ${email}.`,
-        metadata_update: {
-          customer_email: email
-        }
+        reply: "Sure 🙂 Please share your order number."
       });
     }
 
-    /* ===============================
-       FALLBACK
-       =============================== */
+    // List orders intent
+    if (isListOrders) {
+      session.intent = "LIST_ORDERS";
+      sessions.set(conversationId, session);
+
+      // TODO: replace with Shopify list orders
+      return res.json({
+        reply:
+          "Here are your recent orders:\n" +
+          "• #1344 – Fulfilled\n" +
+          "• #1341 – Processing\n" +
+          "• #1339 – Cancelled"
+      });
+    }
+
+    // If bot is waiting for order number but user sends junk
+    if (session.awaiting === "ORDER_NUMBER") {
+      sessions.set(conversationId, session);
+      return res.json({
+        reply: "Please share a valid order number."
+      });
+    }
+
+    // ---------- DEFAULT ----------
+    sessions.set(conversationId, session);
+
     return res.json({
-      reply: 'How can I help you today?'
+      reply:
+        "Hi 👋 I can help with tracking orders, listing orders, or checking products."
     });
   } catch (err) {
-    console.error('chat-message error', err);
+    console.error("Chat error:", err);
     return res.status(500).json({
-      reply: 'Something went wrong. Please try again.'
+      reply: "Sorry, something went wrong."
     });
   }
-}
-
-/* ===============================
-   HELPERS
-   =============================== */
-function formatOrders(orders) {
-  return orders
-    .slice(0, 5)
-    .map(o => {
-      return (
-        `Order ${o.name}\n` +
-        `Placed on ${new Date(o.created_at).toDateString()}\n` +
-        `Status: ${o.financial_status}`
-      );
-    })
-    .join('\n\n');
 }
