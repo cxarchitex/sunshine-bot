@@ -1,88 +1,82 @@
-const sessions = {};
+import { getOrdersByEmail } from './shopify';
+import { extractEmail } from './utils';
 
-export default async function handler(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+export async function handleChatMessage({
+  intent,
+  message,
+  conversationId,
+  metadata = {}
+}) {
+  const customerEmail = metadata.customer_email || null;
 
-  if (req.method === "OPTIONS") return res.status(200).end();
-
-  const { message, conversationId, customerId } = req.body;
-  const text = message.toLowerCase().trim();
-
-  if (!sessions[conversationId]) {
-    sessions[conversationId] = { customerId };
-  }
-
-  const session = sessions[conversationId];
-
-  // ---- LIST ORDERS ----
-  if (/list.*orders|my orders|show orders/.test(text)) {
-    if (!customerId) {
-      return reply(res, "Please log in to view your orders.");
+  /* ===============================
+     LIST ORDERS
+     =============================== */
+  if (intent === 'list_orders') {
+    if (!customerEmail) {
+      return {
+        reply: 'Sure, please share the email used for your order.',
+        next_step: 'collect_email'
+      };
     }
-    return listOrders(customerId, res);
+
+    const orders = await getOrdersByEmail(customerEmail);
+
+    if (!orders.length) {
+      return {
+        reply: `I couldn’t find any orders for ${customerEmail}.`
+      };
+    }
+
+    return {
+      reply: formatOrders(orders)
+    };
   }
 
-  // ---- TRACK ORDER ----
-  if (/track|where.*order|order status/.test(text)) {
-    session.intent = "TRACK_ORDER";
-    return reply(res, "Sure 🙂 Please share your order number.");
-  }
+  /* ===============================
+     COLLECT EMAIL
+     =============================== */
+  if (intent === 'provide_email') {
+    const email = extractEmail(message);
 
-  const match = text.match(/#?(\d{3,})/);
-  if (match && session.intent === "TRACK_ORDER") {
-    return fetchOrder(match[1], customerId, res);
-  }
+    if (!email) {
+      return {
+        reply: 'Please enter a valid email address.'
+      };
+    }
 
-  return reply(res, "I can help with tracking or listing your orders.");
-}
+    const orders = await getOrdersByEmail(email);
 
-/* ---------------- HELPERS ---------------- */
-
-function reply(res, text) {
-  return res.status(200).json({ reply: text });
-}
-
-async function listOrders(customerId, res) {
-  const orders = await shopify(`/orders.json?customer_id=${customerId}&status=any`);
-
-  if (!orders.length) {
-    return reply(res, "You don’t have any orders yet.");
-  }
-
-  const list = orders
-    .slice(0, 5)
-    .map(o => `#${o.order_number} • ${o.financial_status} • ${o.fulfillment_status || "unfulfilled"}`)
-    .join("\n");
-
-  return reply(res, "Here are your recent orders:\n" + list);
-}
-
-async function fetchOrder(orderNumber, customerId, res) {
-  const orders = await shopify(`/orders.json?name=${orderNumber}&status=any`);
-
-  const order = orders.find(o => String(o.customer?.id) === String(customerId));
-
-  if (!order) {
-    return reply(res, "I couldn’t find that order.");
-  }
-
-  return reply(
-    res,
-    `Order #${order.order_number}\nPayment: ${order.financial_status}\nFulfillment: ${order.fulfillment_status || "pending"}`
-  );
-}
-
-async function shopify(path) {
-  const r = await fetch(
-    `https://${process.env.SHOPIFY_STORE_DOMAIN}/admin/api/${process.env.SHOPIFY_API_VERSION}${path}`,
-    {
-      headers: {
-        "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN,
-        "Content-Type": "application/json"
+    return {
+      reply: orders.length
+        ? formatOrders(orders)
+        : `I couldn’t find any orders for ${email}.`,
+      metadata_update: {
+        customer_email: email
       }
-    }
-  );
-  return (await r.json()).orders || [];
+    };
+  }
+
+  /* ===============================
+     FALLBACK
+     =============================== */
+  return {
+    reply: 'How can I help you today?'
+  };
+}
+
+/* ===============================
+   HELPERS
+   =============================== */
+function formatOrders(orders) {
+  return orders
+    .slice(0, 5)
+    .map(o => {
+      return (
+        `Order ${o.name}\n` +
+        `Placed on ${new Date(o.created_at).toDateString()}\n` +
+        `Status: ${o.financial_status}`
+      );
+    })
+    .join('\n\n');
 }
