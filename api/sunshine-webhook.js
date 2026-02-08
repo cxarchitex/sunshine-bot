@@ -1,64 +1,56 @@
+import { handleChatMessage } from './chat-message';
+
 export default async function handler(req, res) {
-  const body = req.body || {};
-
-  const appId = body?.app?.id;
-  const conversationId = body?.conversation?.id;
-  const message = body?.messages?.[0];
-
-  if (!appId || !conversationId) {
-    return res.status(200).end();
+  if (req.method !== 'POST') {
+    return res.status(405).end();
   }
 
-  await acceptControl(appId, conversationId);
+  try {
+    const event = req.body;
 
-  if (!message || message.author?.type !== "user") {
-    return res.status(200).end();
+    const messageText =
+      event?.events?.[0]?.payload?.text || '';
+
+    const conversationId =
+      event?.events?.[0]?.conversation?.id;
+
+    const metadata =
+      event?.events?.[0]?.conversation?.metadata || {};
+
+    const intent = detectIntent(messageText);
+
+    const result = await handleChatMessage({
+      intent,
+      message: messageText,
+      conversationId,
+      metadata
+    });
+
+    return res.json({
+      reply: result.reply,
+      metadata_update: result.metadata_update || null
+    });
+  } catch (err) {
+    console.error('Sunshine webhook error', err);
+    return res.status(500).end();
   }
-
-  const text = message.content?.text?.trim();
-
-  let reply = "Hi 👋 How can I help you today?";
-  if (/order|track/i.test(text)) {
-    reply = "Please share your order number.";
-  }
-
-  await sendMessage(appId, conversationId, reply);
-  res.status(200).end();
 }
 
-async function acceptControl(appId, conversationId) {
-  await fetch(
-    `https://api.smooch.io/v2/apps/${appId}/conversations/${conversationId}/switchboard/accept`,
-    {
-      method: "POST",
-      headers: {
-        Authorization:
-          "Basic " +
-          Buffer.from(
-            `${process.env.SUNSHINE_KEY_ID}:${process.env.SUNSHINE_KEY_SECRET}`
-          ).toString("base64")
-      }
-    }
-  );
-}
+/* ===============================
+   SIMPLE INTENT DETECTION
+   =============================== */
+function detectIntent(text) {
+  if (!text) return 'fallback';
 
-async function sendMessage(appId, conversationId, text) {
-  await fetch(
-    `https://api.smooch.io/v2/apps/${appId}/conversations/${conversationId}/messages`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization:
-          "Basic " +
-          Buffer.from(
-            `${process.env.SUNSHINE_KEY_ID}:${process.env.SUNSHINE_KEY_SECRET}`
-          ).toString("base64")
-      },
-      body: JSON.stringify({
-        author: { type: "business" },
-        content: { type: "text", text }
-      })
-    }
-  );
+  const lower = text.toLowerCase();
+
+  if (lower.includes('list') && lower.includes('order')) {
+    return 'list_orders';
+  }
+
+  if (lower.includes('@')) {
+    return 'provide_email';
+  }
+
+  return 'fallback';
 }
