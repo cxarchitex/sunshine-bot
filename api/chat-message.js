@@ -1,5 +1,3 @@
-import fetch from "node-fetch";
-
 const SHOPIFY_DOMAIN = process.env.SHOPIFY_STORE_DOMAIN;
 const SHOPIFY_ADMIN_TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
 const SHOPIFY_API_VERSION = "2024-01";
@@ -36,12 +34,11 @@ async function shopifyFetch(path) {
 }
 
 export default async function handler(req, res) {
-  /* ---------------- CORS HEADERS ---------------- */
+  /* ---------------- CORS ---------------- */
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  /* ---------------- PREFLIGHT ---------------- */
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
@@ -55,35 +52,29 @@ export default async function handler(req, res) {
     const text = message.toLowerCase();
     const session = getSession(conversationId);
 
-    /* ---------- INTENTS ---------- */
-
+    /* -------- LIST ORDERS -------- */
     if (/list.*order|my orders/.test(text)) {
       session.intent = "LIST_ORDERS";
-      sessions.set(conversationId, session);
-
       return res.json({
         reply: "Please share the email used for your orders."
       });
     }
 
+    /* -------- TRACK ORDER -------- */
     if (/track.*order|where.*order/.test(text)) {
       session.intent = "TRACK_ORDER";
-      sessions.set(conversationId, session);
-
       return res.json({
         reply: "Please share your order number."
       });
     }
 
-    /* ---------- EMAIL ---------- */
-
+    /* -------- EMAIL -------- */
     const emailMatch = message.match(
       /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i
     );
 
     if (emailMatch && session.intent === "LIST_ORDERS") {
       session.email = emailMatch[0];
-      sessions.set(conversationId, session);
 
       const data = await shopifyFetch(
         `orders.json?email=${encodeURIComponent(
@@ -111,8 +102,7 @@ export default async function handler(req, res) {
       });
     }
 
-    /* ---------- ORDER NUMBER ---------- */
-
+    /* -------- ORDER NUMBER -------- */
     const orderMatch = message.match(/#?\d{3,}/);
 
     if (orderMatch && session.intent === "TRACK_ORDER") {
@@ -137,8 +127,7 @@ export default async function handler(req, res) {
       });
     }
 
-    /* ---------- FALLBACK ---------- */
-
+    /* -------- FALLBACK -------- */
     return res.json({
       reply:
         "Hi 👋 I can help with tracking orders, listing orders, or checking products."
