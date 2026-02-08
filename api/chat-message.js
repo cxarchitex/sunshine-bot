@@ -1,166 +1,88 @@
+const sessions = {};
+
 export default async function handler(req, res) {
-  // ===== CORS HEADERS (ALWAYS FIRST) =====
-  res.setHeader("Access-Control-Allow-Origin", "https://cx-demostore.myshopify.com");
+  res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  // Handle preflight
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
+  if (req.method === "OPTIONS") return res.status(200).end();
+
+  const { message, conversationId, customerId } = req.body;
+  const text = message.toLowerCase().trim();
+
+  if (!sessions[conversationId]) {
+    sessions[conversationId] = { customerId };
   }
 
-  try {
-    if (req.method !== "POST") {
-      return res.status(405).json({ error: "Method not allowed" });
+  const session = sessions[conversationId];
+
+  // ---- LIST ORDERS ----
+  if (/list.*orders|my orders|show orders/.test(text)) {
+    if (!customerId) {
+      return reply(res, "Please log in to view your orders.");
     }
-
-    const { message, conversationId, customerEmail } = req.body;
-
-    if (!message || !conversationId) {
-      return res.status(400).json({ error: "Missing message or conversationId" });
-    }
-
-    // ===== SIMPLE IN-MEMORY SESSION =====
-    global.sessions = global.sessions || {};
-    const sessions = global.sessions;
-    const session = sessions[conversationId] || {};
-    sessions[conversationId] = session;
-
-    const intent = detectIntent(message);
-    const orderNumber = extractOrderNumber(message);
-
-    // ===== LIST ORDERS =====
-    if (intent === "list_orders") {
-      if (!customerEmail) {
-        return reply(res, "Please log in so I can fetch your orders.");
-      }
-
-      const orders = await fetchOrdersByEmail(customerEmail);
-
-      if (!orders.length) {
-        return reply(res, "I couldn’t find any orders under your email.");
-      }
-
-      return reply(res, formatOrderList(orders));
-    }
-
-    // ===== TRACK ORDER =====
-    if (intent === "track_order") {
-      session.intent = "track_order";
-
-      if (orderNumber) {
-        const order = await fetchOrderByNumber(orderNumber);
-
-        if (!order) {
-          return reply(res, "I couldn’t find an order with that number.");
-        }
-
-        delete sessions[conversationId];
-        return reply(res, formatOrderStatus(order));
-      }
-
-      session.awaitingOrderNumber = true;
-      return reply(res, "Sure 🙂 Please share your order number.");
-    }
-
-    // ===== CONTINUATION =====
-    if (session.intent === "track_order" && session.awaitingOrderNumber) {
-      if (!orderNumber) {
-        return reply(res, "Please share a valid order number.");
-      }
-
-      const order = await fetchOrderByNumber(orderNumber);
-
-      if (!order) {
-        return reply(res, "I couldn’t find an order with that number.");
-      }
-
-      delete sessions[conversationId];
-      return reply(res, formatOrderStatus(order));
-    }
-
-    // ===== FALLBACK =====
-    return reply(
-      res,
-      "I can help with tracking orders, listing orders, or checking products."
-    );
-
-  } catch (error) {
-    console.error("CHAT MESSAGE ERROR:", error);
-    return res.status(500).json({ error: "Internal server error" });
+    return listOrders(customerId, res);
   }
+
+  // ---- TRACK ORDER ----
+  if (/track|where.*order|order status/.test(text)) {
+    session.intent = "TRACK_ORDER";
+    return reply(res, "Sure 🙂 Please share your order number.");
+  }
+
+  const match = text.match(/#?(\d{3,})/);
+  if (match && session.intent === "TRACK_ORDER") {
+    return fetchOrder(match[1], customerId, res);
+  }
+
+  return reply(res, "I can help with tracking or listing your orders.");
 }
 
-/* ================= HELPERS ================= */
+/* ---------------- HELPERS ---------------- */
 
 function reply(res, text) {
   return res.status(200).json({ reply: text });
 }
 
-function detectIntent(text) {
-  const msg = text.toLowerCase();
+async function listOrders(customerId, res) {
+  const orders = await shopify(`/orders.json?customer_id=${customerId}&status=any`);
 
-  if (msg.match(/list.*order|my orders|recent orders/)) return "list_orders";
-  if (msg.match(/track|where.*order|order status/)) return "track_order";
+  if (!orders.length) {
+    return reply(res, "You don’t have any orders yet.");
+  }
 
-  return "unknown";
-}
-
-function extractOrderNumber(text) {
-  const match = text.match(/\b\d{3,}\b/);
-  return match ? match[0] : null;
-}
-
-/* ================= SHOPIFY ================= */
-
-async function fetchOrdersByEmail(email) {
-  const url = `https://${process.env.SHOPIFY_STORE_DOMAIN}/admin/api/2024-01/orders.json?email=${encodeURIComponent(
-    email
-  )}&status=any`;
-
-  const res = await fetch(url, {
-    headers: {
-      "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN,
-      "Content-Type": "application/json"
-    }
-  });
-
-  if (!res.ok) throw new Error("Shopify fetch failed");
-
-  const data = await res.json();
-  return data.orders || [];
-}
-
-async function fetchOrderByNumber(orderNumber) {
-  const url = `https://${process.env.SHOPIFY_STORE_DOMAIN}/admin/api/2024-01/orders.json?name=${orderNumber}&status=any`;
-
-  const res = await fetch(url, {
-    headers: {
-      "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN,
-      "Content-Type": "application/json"
-    }
-  });
-
-  if (!res.ok) throw new Error("Shopify fetch failed");
-
-  const data = await res.json();
-  return data.orders?.[0] || null;
-}
-
-function formatOrderList(orders) {
-  return orders
+  const list = orders
     .slice(0, 5)
-    .map(o => `• ${o.name} — ${o.financial_status} — ${o.fulfillment_status || "unfulfilled"}`)
+    .map(o => `#${o.order_number} • ${o.financial_status} • ${o.fulfillment_status || "unfulfilled"}`)
     .join("\n");
+
+  return reply(res, "Here are your recent orders:\n" + list);
 }
 
-function formatOrderStatus(order) {
-  return `
-Order ${order.name}
+async function fetchOrder(orderNumber, customerId, res) {
+  const orders = await shopify(`/orders.json?name=${orderNumber}&status=any`);
 
-Payment: ${order.financial_status}
-Fulfillment: ${order.fulfillment_status || "Not fulfilled"}
-Cancelled: ${order.cancelled_at ? "Yes" : "No"}
-${order.fulfillments?.[0]?.tracking_url ? `Tracking: ${order.fulfillments[0].tracking_url}` : ""}
-`.trim();
+  const order = orders.find(o => String(o.customer?.id) === String(customerId));
+
+  if (!order) {
+    return reply(res, "I couldn’t find that order.");
+  }
+
+  return reply(
+    res,
+    `Order #${order.order_number}\nPayment: ${order.financial_status}\nFulfillment: ${order.fulfillment_status || "pending"}`
+  );
+}
+
+async function shopify(path) {
+  const r = await fetch(
+    `https://${process.env.SHOPIFY_STORE_DOMAIN}/admin/api/${process.env.SHOPIFY_API_VERSION}${path}`,
+    {
+      headers: {
+        "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN,
+        "Content-Type": "application/json"
+      }
+    }
+  );
+  return (await r.json()).orders || [];
 }
