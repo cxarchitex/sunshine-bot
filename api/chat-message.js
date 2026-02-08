@@ -1,114 +1,172 @@
 export default async function handler(req, res) {
-  // ---------- CORS (Shopify safe) ----------
-  res.setHeader(
-    'Access-Control-Allow-Origin',
-    'https://cx-demostore.myshopify.com'
-  );
-  res.setHeader(
-    'Access-Control-Allow-Methods',
-    'POST, OPTIONS'
-  );
-  res.setHeader(
-    'Access-Control-Allow-Headers',
-    'Content-Type'
-  );
-
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
-
   try {
-    const { message, sessionId, context = {} } = req.body;
-
-    if (!message || !sessionId) {
-      return res.status(400).json({
-        error: 'Missing message or sessionId'
-      });
+    if (req.method !== "POST") {
+      return res.status(405).json({ error: "Method not allowed" });
     }
 
-    const text = message.toLowerCase().trim();
-    let reply = '';
-    let updatedContext = { ...context };
+    const { message, conversationId, customerEmail } = req.body;
 
-    // ----------------------------
-    // INTENT: TRACK ORDER
-    // ----------------------------
-    if (/track.*order|order status|check.*order/.test(text)) {
-      reply = 'Sure 🙂 Please share your order number.';
-      updatedContext.expectingOrderNumber = true;
+    if (!message || !conversationId) {
+      return res.status(400).json({ error: "Missing message or conversationId" });
     }
 
-    // ----------------------------
-    // ORDER NUMBER PROVIDED
-    // ----------------------------
-    else if (/^\d{3,}$/.test(text)) {
-      if (context.expectingOrderNumber) {
-        reply = `Thanks 🙂 I’m checking order #${text}. Please hold on.`;
-        updatedContext.expectingOrderNumber = false;
-        updatedContext.lastOrderNumber = text;
-      } else {
-        reply = `I received order number ${text}. What would you like to do with it?`;
+    // Session store (in-memory)
+    global.sessions = global.sessions || {};
+    const sessions = global.sessions;
+
+    const session = sessions[conversationId] || {};
+    sessions[conversationId] = session;
+
+    const intent = detectIntent(message);
+    const orderNumber = extractOrderNumber(message);
+
+    // ===== LIST ORDERS =====
+    if (intent === "list_orders") {
+      if (!customerEmail) {
+        return reply(res, "Please make sure you are logged in so I can fetch your orders.");
       }
+
+      const orders = await fetchOrdersByEmail(customerEmail);
+
+      if (!orders.length) {
+        return reply(res, "I couldn’t find any orders under your email.");
+      }
+
+      return reply(res, `Here are your recent orders 👇\n\n${formatOrderList(orders)}`);
     }
 
-    // ----------------------------
-    // INTENT: CART
-    // ----------------------------
-    else if (/cart|my cart|what.*in.*cart/.test(text)) {
-      reply = 'Your cart is currently empty. Would you like help finding a product?';
+    // ===== TRACK ORDER =====
+    if (intent === "track_order") {
+      session.intent = "track_order";
+
+      if (orderNumber) {
+        const order = await fetchOrderByNumber(orderNumber);
+
+        if (!order) {
+          return reply(res, "I couldn’t find an order with that number. Please double-check it.");
+        }
+
+        delete sessions[conversationId];
+        return reply(res, formatOrderStatus(order));
+      }
+
+      session.awaitingOrderNumber = true;
+      return reply(res, "Sure 🙂 Please share your order number.");
     }
 
-    // ----------------------------
-    // INTENT: PRODUCT HELP
-    // ----------------------------
-    else if (/product|recommend|suggest|help me buy/.test(text)) {
-      reply = 'I can help you compare products, check availability, or add items to your cart.';
+    // ===== CONTINUE TRACK ORDER FLOW =====
+    if (session.intent === "track_order" && session.awaitingOrderNumber) {
+      if (!orderNumber) {
+        return reply(res, "Please share a valid order number.");
+      }
+
+      const order = await fetchOrderByNumber(orderNumber);
+
+      if (!order) {
+        return reply(res, "I couldn’t find an order with that number. Please double-check it.");
+      }
+
+      delete sessions[conversationId];
+      return reply(res, formatOrderStatus(order));
     }
 
-    // ----------------------------
-    // INTENT: RETURNS / CANCEL
-    // ----------------------------
-    else if (/cancel|refund|return/.test(text)) {
-      reply = 'I can help with cancellations or returns. Please share your order number.';
-      updatedContext.expectingOrderNumber = true;
-    }
-
-    // ----------------------------
-    // INTENT: CAPABILITIES
-    // ----------------------------
-    else if (/what can you help|what do you do|help me with/.test(text)) {
-      reply =
-        'I can help with order tracking, cart details, product questions, cancellations, and returns.';
-    }
-
-    // ----------------------------
-    // GREETING (ONLY ONCE PER SESSION)
-    // ----------------------------
-    else if (/^hi$|^hello$|^hey$/.test(text) && !context.greeted) {
-      reply = 'Hi 👋 How can I help you today?';
-      updatedContext.greeted = true;
-    }
-
-    // ----------------------------
-    // FALLBACK
-    // ----------------------------
-    else {
-      reply = 'Got it 👍 How can I help you next?';
-    }
-
-    return res.status(200).json({
-      reply,
-      context: updatedContext
-    });
-
+    // ===== FALLBACK =====
+    return reply(
+      res,
+      "I can help with tracking an order, listing your orders, or checking product and cart details."
+    );
   } catch (error) {
-    console.error('Chat API error:', error);
-    return res.status(500).json({
-      error: 'Internal server error'
-    });
+    console.error("CHAT MESSAGE ERROR:", error);
+    return res.status(500).json({ error: "Internal server error" });
   }
+}
+
+/* ================= HELPERS ================= */
+
+function reply(res, text) {
+  return res.status(200).json({ reply: text });
+}
+
+function detectIntent(message) {
+  const text = message.toLowerCase();
+
+  if (text.match(/list.*order|my orders|recent orders|show.*orders/)) {
+    return "list_orders";
+  }
+
+  if (text.match(/track|where.*order|order status|find.*order/)) {
+    return "track_order";
+  }
+
+  return "unknown";
+}
+
+function extractOrderNumber(message) {
+  const match = message.match(/\b\d{3,}\b/);
+  return match ? match[0] : null;
+}
+
+/* ================= SHOPIFY ================= */
+
+async function fetchOrdersByEmail(email) {
+  const url = `https://${process.env.SHOPIFY_STORE_DOMAIN}/admin/api/2024-01/orders.json?email=${encodeURIComponent(
+    email
+  )}&status=any`;
+
+  const res = await fetch(url, {
+    headers: {
+      "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN,
+      "Content-Type": "application/json"
+    }
+  });
+
+  if (!res.ok) {
+    throw new Error("Failed to fetch orders");
+  }
+
+  const data = await res.json();
+  return data.orders || [];
+}
+
+async function fetchOrderByNumber(orderNumber) {
+  const url = `https://${process.env.SHOPIFY_STORE_DOMAIN}/admin/api/2024-01/orders.json?name=${orderNumber}&status=any`;
+
+  const res = await fetch(url, {
+    headers: {
+      "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN,
+      "Content-Type": "application/json"
+    }
+  });
+
+  if (!res.ok) {
+    throw new Error("Failed to fetch order");
+  }
+
+  const data = await res.json();
+  return data.orders?.[0] || null;
+}
+
+function formatOrderList(orders) {
+  return orders
+    .slice(0, 5)
+    .map(
+      o =>
+        `• ${o.name} — ${o.fulfillment_status || "unfulfilled"} — ${o.financial_status}`
+    )
+    .join("\n");
+}
+
+function formatOrderStatus(order) {
+  return `
+Order ${order.name}
+
+Financial status: ${order.financial_status}
+Fulfillment status: ${order.fulfillment_status || "Not fulfilled"}
+Cancelled: ${order.cancelled_at ? "Yes" : "No"}
+${
+  order.fulfillments?.[0]?.tracking_url
+    ? `Tracking link: ${order.fulfillments[0].tracking_url}`
+    : ""
+}
+`.trim();
 }
