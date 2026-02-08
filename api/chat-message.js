@@ -1,68 +1,92 @@
 import { getOrdersByEmail } from './shopify';
 import { extractEmail } from './utils';
 
-export async function handleChatMessage({
-  intent,
-  message,
-  conversationId,
-  metadata = {}
-}) {
-  const customerEmail = metadata.customer_email || null;
-
+export default async function handler(req, res) {
   /* ===============================
-     LIST ORDERS
+     CORS HEADERS (MUST BE FIRST)
      =============================== */
-  if (intent === 'list_orders') {
-    if (!customerEmail) {
-      return {
-        reply: 'Sure, please share the email used for your order.',
-        next_step: 'collect_email'
-      };
-    }
+  res.setHeader('Access-Control-Allow-Origin', 'https://cx-demostore.myshopify.com');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-    const orders = await getOrdersByEmail(customerEmail);
-
-    if (!orders.length) {
-      return {
-        reply: `I couldn’t find any orders for ${customerEmail}.`
-      };
-    }
-
-    return {
-      reply: formatOrders(orders)
-    };
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
   }
 
-  /* ===============================
-     COLLECT EMAIL
-     =============================== */
-  if (intent === 'provide_email') {
-    const email = extractEmail(message);
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
 
-    if (!email) {
-      return {
-        reply: 'Please enter a valid email address.'
-      };
-    }
+  try {
+    const {
+      intent,
+      message,
+      conversationId,
+      metadata = {}
+    } = req.body;
 
-    const orders = await getOrdersByEmail(email);
+    const customerEmail = metadata.customer_email || null;
 
-    return {
-      reply: orders.length
-        ? formatOrders(orders)
-        : `I couldn’t find any orders for ${email}.`,
-      metadata_update: {
-        customer_email: email
+    /* ===============================
+       LIST ORDERS
+       =============================== */
+    if (intent === 'list_orders') {
+      if (!customerEmail) {
+        return res.json({
+          reply: 'Sure, please share the email used for your order.',
+          next_step: 'collect_email'
+        });
       }
-    };
-  }
 
-  /* ===============================
-     FALLBACK
-     =============================== */
-  return {
-    reply: 'How can I help you today?'
-  };
+      const orders = await getOrdersByEmail(customerEmail);
+
+      if (!orders.length) {
+        return res.json({
+          reply: `I couldn’t find any orders for ${customerEmail}.`
+        });
+      }
+
+      return res.json({
+        reply: formatOrders(orders)
+      });
+    }
+
+    /* ===============================
+       COLLECT EMAIL
+       =============================== */
+    if (intent === 'provide_email') {
+      const email = extractEmail(message);
+
+      if (!email) {
+        return res.json({
+          reply: 'Please enter a valid email address.'
+        });
+      }
+
+      const orders = await getOrdersByEmail(email);
+
+      return res.json({
+        reply: orders.length
+          ? formatOrders(orders)
+          : `I couldn’t find any orders for ${email}.`,
+        metadata_update: {
+          customer_email: email
+        }
+      });
+    }
+
+    /* ===============================
+       FALLBACK
+       =============================== */
+    return res.json({
+      reply: 'How can I help you today?'
+    });
+  } catch (err) {
+    console.error('chat-message error', err);
+    return res.status(500).json({
+      reply: 'Something went wrong. Please try again.'
+    });
+  }
 }
 
 /* ===============================
