@@ -1,18 +1,34 @@
-// api/chat-message.js
+import fetch from "node-fetch";
 
+const SHOPIFY_DOMAIN = process.env.SHOPIFY_DOMAIN;
+const SHOPIFY_ADMIN_TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
+const SHOPIFY_API_VERSION = "2024-01";
+
+// In-memory session store (OK for demo / Vercel edge)
 const sessions = new Map();
 
-const SHOP = process.env.SHOPIFY_SHOP_DOMAIN;
-const TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
-const VERSION = process.env.SHOPIFY_API_VERSION || "2024-01";
+function getSession(conversationId) {
+  if (!sessions.has(conversationId)) {
+    sessions.set(conversationId, {
+      intent: null,
+      awaiting: null,
+      email: null,
+      orderNumber: null
+    });
+  }
+  return sessions.get(conversationId);
+}
 
 async function shopifyFetch(path) {
-  const res = await fetch(`https://${SHOP}/admin/api/${VERSION}/${path}`, {
-    headers: {
-      "X-Shopify-Access-Token": TOKEN,
-      "Content-Type": "application/json"
+  const res = await fetch(
+    `https://${SHOPIFY_STORE_DOMAIN}/admin/api/${SHOPIFY_API_VERSION}/${path}`,
+    {
+      headers: {
+        "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
+        "Content-Type": "application/json"
+      }
     }
-  });
+  );
 
   if (!res.ok) {
     const text = await res.text();
@@ -23,80 +39,47 @@ async function shopifyFetch(path) {
 }
 
 export default async function handler(req, res) {
-  // ---- CORS ----
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
   }
 
   try {
     const { message, conversationId } = req.body;
-    if (!message || !conversationId) {
-      return res.status(400).json({ reply: "Invalid request" });
+    const text = message.toLowerCase();
+    const session = getSession(conversationId);
+
+    /* ---------------- INTENT DETECTION ---------------- */
+
+    if (/list.*order|my orders|show orders/.test(text)) {
+      session.intent = "LIST_ORDERS";
+      session.awaiting = "EMAIL";
+      sessions.set(conversationId, session);
+
+      return res.json({
+        reply: "Please share the email used for your orders."
+      });
     }
 
-    const text = message.toLowerCase().trim();
-    const session =
-      sessions.get(conversationId) || {
-        intent: null,
-        awaiting: null,
-        email: null
-      };
+    if (/track.*order|where.*order/.test(text)) {
+      session.intent = "TRACK_ORDER";
+      session.awaiting = "ORDER_NUMBER";
+      sessions.set(conversationId, session);
 
-    // ---- Extract email ----
+      return res.json({
+        reply: "Please share your order number."
+      });
+    }
+
+    /* ---------------- EMAIL HANDLING ---------------- */
+
     const emailMatch = message.match(
       /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i
     );
 
-    if (emailMatch) {
+    if (emailMatch && session.intent === "LIST_ORDERS") {
       session.email = emailMatch[0];
       session.awaiting = null;
       sessions.set(conversationId, session);
-    }
-
-    // ---- Extract order number ----
-    const orderNumberMatch = message.match(/\b\d{3,}\b/);
-
-    // ---- INTENTS ----
-    const wantsTrack =
-      text.includes("track") || text.includes("where is my order");
-
-    const wantsList =
-      text.includes("list my orders") || text.includes("my orders");
-
-    // ---- TRACK ORDER ----
-    if (wantsTrack) {
-      session.intent = "TRACK_ORDER";
-
-      if (!session.email) {
-        session.awaiting = "EMAIL";
-        sessions.set(conversationId, session);
-        return res.json({
-          reply: "Sure 🙂 Please share the email used for your order."
-        });
-      }
-
-      session.awaiting = "ORDER_NUMBER";
-      sessions.set(conversationId, session);
-      return res.json({
-        reply: "Got it 👍 Please share your order number."
-      });
-    }
-
-    // ---- LIST ORDERS ----
-    if (wantsList) {
-      session.intent = "LIST_ORDERS";
-
-      if (!session.email) {
-        session.awaiting = "EMAIL";
-        sessions.set(conversationId, session);
-        return res.json({
-          reply: "Please share the email used for your orders."
-        });
-      }
 
       const data = await shopifyFetch(
         `orders.json?email=${encodeURIComponent(
@@ -113,7 +96,9 @@ export default async function handler(req, res) {
       const summary = data.orders
         .map(
           (o) =>
-            `• #${o.order_number} – ${o.financial_status}, ${o.fulfillment_status || "unfulfilled"}`
+            `• #${o.order_number} – ${o.financial_status}, ${
+              o.fulfillment_status || "unfulfilled"
+            }`
         )
         .join("\n");
 
@@ -122,50 +107,18 @@ export default async function handler(req, res) {
       });
     }
 
-    // ---- HANDLE EMAIL PROVIDED ----
-    if (session.awaiting === "EMAIL" && session.email) {
+    /* ---------------- ORDER NUMBER HANDLING ---------------- */
+
+    const orderNumberMatch = message.match(/#?\d{3,}/);
+
+    if (orderNumberMatch && session.intent === "TRACK_ORDER") {
+      const orderNumber = orderNumberMatch[0].replace("#", "");
+      session.orderNumber = orderNumber;
+      session.awaiting = null;
       sessions.set(conversationId, session);
 
-      if (session.intent === "LIST_ORDERS") {
-        const data = await shopifyFetch(
-          `orders.json?email=${encodeURIComponent(
-            session.email
-          )}&status=any&limit=5`
-        );
-
-        if (!data.orders.length) {
-          return res.json({
-            reply: "I couldn’t find any orders for this email."
-          });
-        }
-
-        const summary = data.orders
-          .map(
-            (o) =>
-              `• #${o.order_number} – ${o.financial_status}, ${o.fulfillment_status || "unfulfilled"}`
-          )
-          .join("\n");
-
-        return res.json({
-          reply: `Here are your recent orders:\n${summary}`
-        });
-      }
-
-      return res.json({
-        reply: "Thanks 🙂 Please continue."
-      });
-    }
-
-    // ---- HANDLE ORDER NUMBER ----
-    if (
-      session.intent === "TRACK_ORDER" &&
-      session.awaiting === "ORDER_NUMBER" &&
-      orderNumberMatch
-    ) {
-      const orderNumber = orderNumberMatch[0];
-
       const data = await shopifyFetch(
-        `orders.json?name=${orderNumber}&status=any`
+        `orders.json?name=%23${orderNumber}&status=any`
       );
 
       if (!data.orders.length) {
@@ -174,21 +127,19 @@ export default async function handler(req, res) {
         });
       }
 
-      const o = data.orders[0];
-
-      session.awaiting = null;
-      sessions.set(conversationId, session);
+      const order = data.orders[0];
 
       return res.json({
-        reply:
-          `Order #${o.order_number} status:\n` +
-          `• Payment: ${o.financial_status}\n` +
-          `• Fulfillment: ${o.fulfillment_status || "unfulfilled"}`
+        reply: `Order #${order.order_number}\nPayment: ${
+          order.financial_status
+        }\nFulfillment: ${
+          order.fulfillment_status || "unfulfilled"
+        }`
       });
     }
 
-    // ---- DEFAULT ----
-    sessions.set(conversationId, session);
+    /* ---------------- FALLBACK ---------------- */
+
     return res.json({
       reply:
         "Hi 👋 I can help with tracking orders, listing orders, or checking products."
@@ -196,7 +147,7 @@ export default async function handler(req, res) {
   } catch (err) {
     console.error("Chat error:", err);
     return res.status(500).json({
-      reply: "Sorry, something went wrong."
+      reply: "Something went wrong while checking your order."
     });
   }
 }
