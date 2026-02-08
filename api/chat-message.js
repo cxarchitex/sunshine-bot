@@ -1,32 +1,23 @@
 const sessionConversationMap = new Map();
 
 export default async function handler(req, res) {
-  // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
-
-  if (req.method !== "POST") {
-    return res.status(405).end();
-  }
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") return res.status(405).end();
 
   try {
     const { session_id, message } = req.body || {};
-
     if (!session_id || !message) {
-      return res.status(400).json({
-        error: "Missing session_id or message"
-      });
+      return res.status(400).json({ error: "Missing session_id or message" });
     }
 
     let conversationId = sessionConversationMap.get(session_id);
 
     if (!conversationId) {
-      conversationId = await createConversation();
+      conversationId = await createConversation(session_id);
       sessionConversationMap.set(session_id, conversationId);
     }
 
@@ -39,9 +30,7 @@ export default async function handler(req, res) {
     return res.status(200).json({ reply });
   } catch (err) {
     console.error("CHAT MESSAGE ERROR:", err);
-    return res.status(500).json({
-      error: "Internal server error"
-    });
+    return res.status(500).json({ error: "Internal server error" });
   }
 }
 
@@ -55,7 +44,27 @@ function getBotReply(text = "") {
   return "Hi 👋 How can I help you today?";
 }
 
-async function createConversation() {
+async function createConversation(sessionId) {
+  // 1. Upsert user
+  await fetch(
+    `https://api.smooch.io/v2/apps/${process.env.SUNSHINE_APP_ID}/users`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization:
+          "Basic " +
+          Buffer.from(
+            `${process.env.SUNSHINE_KEY_ID}:${process.env.SUNSHINE_KEY_SECRET}`
+          ).toString("base64")
+      },
+      body: JSON.stringify({
+        externalId: sessionId
+      })
+    }
+  );
+
+  // 2. Create conversation
   const response = await fetch(
     `https://api.smooch.io/v2/apps/${process.env.SUNSHINE_APP_ID}/conversations`,
     {
@@ -70,7 +79,12 @@ async function createConversation() {
       },
       body: JSON.stringify({
         type: "personal",
-        participants: [{ role: "user" }]
+        participants: [
+          {
+            role: "user",
+            userExternalId: sessionId
+          }
+        ]
       })
     }
   );
@@ -99,10 +113,7 @@ async function sendMessage(conversationId, text, sender) {
       },
       body: JSON.stringify({
         author: sender === "bot" ? { type: "business" } : { type: "user" },
-        content: {
-          type: "text",
-          text
-        }
+        content: { type: "text", text }
       })
     }
   );
