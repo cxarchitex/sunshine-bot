@@ -1,12 +1,9 @@
 export default async function handler(req, res) {
   const body = req.body || {};
 
-  const trigger = body.trigger;
   const appId = body?.app?.id;
   const conversationId = body?.conversation?.id;
   const message = body?.messages?.[0];
-
-  console.log("SUNSHINE EVENT:", trigger, appId, conversationId);
 
   if (!appId || !conversationId) {
     return res.status(200).end();
@@ -19,16 +16,13 @@ export default async function handler(req, res) {
   }
 
   const text = message.content?.text?.trim();
-  console.log("USER MESSAGE (Zendesk):", text);
 
   let reply = "Hi 👋 How can I help you today?";
-
   if (/order|track/i.test(text)) {
     reply = "Please share your order number.";
   }
 
   await sendMessage(appId, conversationId, reply);
-
   res.status(200).end();
 }
 
