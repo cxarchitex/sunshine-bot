@@ -1,190 +1,139 @@
-const sessionConversationMap = new Map();
-const sessionState = new Map();
+import fetch from "node-fetch";
 
-export default async function handler(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") return res.status(405).end();
+/* -----------------------------
+   Simple in-memory session store
+-------------------------------- */
+const sessions = {};
 
-  const { session_id, message, context } = req.body || {};
-  if (!session_id || !message) {
-    return res.status(400).json({ error: "Missing data" });
+/* -----------------------------
+   Intent detection
+-------------------------------- */
+function detectIntent(message, context, session) {
+  const text = message.toLowerCase();
+
+  // Continuation has highest priority
+  if (session.awaitingOrderNumber && /\d{3,}/.test(text)) {
+    return "order_number_provided";
   }
 
-  let conversationId = sessionConversationMap.get(session_id);
-  if (!conversationId) {
-    conversationId = await createConversation(session_id);
-    sessionConversationMap.set(session_id, conversationId);
-  }
+  if (/track|where.*order|order status/.test(text)) return "track_order";
+  if (/cancel.*order/.test(text)) return "cancel_order";
+  if (/return|refund/.test(text)) return "return_order";
+  if (/cart|my cart|what.*cart/.test(text)) return "cart_status";
 
-  await sendMessage(conversationId, message, "user");
+  if (context.product && text.length < 20) return "product_query";
 
-  const text = message.toLowerCase().trim();
-  let state = sessionState.get(session_id) || {};
-  let reply;
-
-  const orderMatch = text.match(/\b\d{4,}\b/);
-  const orderNumber = orderMatch ? orderMatch[0] : null;
-
-  /* PRIORITY 1: CART */
-  if (/cart/.test(text)) {
-    if (!context?.cart || context.cart.items.length === 0) {
-      reply = "Your cart is currently empty. Would you like help finding a product?";
-    } else {
-      const items = context.cart.items
-        .map(i => `• ${i.title} ×${i.quantity}`)
-        .join("\n");
-      reply =
-        `You currently have ${context.cart.items.length} item(s) in your cart:\n` +
-        `${items}\n\nWould you like help checking out or modifying your cart?`;
-    }
-  }
-
-  /* PRIORITY 2: PRODUCT */
-  else if (context?.product && /this|it|price|compatible|available/.test(text)) {
-    reply =
-      `You’re viewing ${context.product.title}.\n` +
-      `Price: ₹${context.product.price}\n` +
-      `Would you like compatibility details, delivery info, or to add it to your cart?`;
-  }
-
-  /* PRIORITY 3: ORDER TRACKING */
-  else if (/track|order status|where is my order/.test(text)) {
-    state.flow = "track";
-    if (orderNumber) {
-      reply = await handleOrder(orderNumber);
-      state.flow = null;
-    } else {
-      reply = "Sure 🙂 Please share your order number.";
-    }
-  }
-
-  else if (state.flow === "track" && orderNumber) {
-    reply = await handleOrder(orderNumber);
-    state.flow = null;
-  }
-
-  /* PRIORITY 4: CANCELLATION */
-  else if (/cancel/.test(text)) {
-    state.flow = "cancel";
-    reply = "Please share your order number so I can check if it can be cancelled.";
-  }
-
-  /* FALLBACK */
-  else {
-    reply =
-      "I can help with your cart, product details, or order tracking.\n" +
-      "What would you like to do?";
-  }
-
-  sessionState.set(session_id, state);
-  await sendMessage(conversationId, reply, "bot");
-  res.status(200).json({ reply });
+  return "fallback";
 }
 
-async function handleOrder(orderNumber) {
-  const order = await fetchOrderByNumber(orderNumber);
-  if (!order) {
-    return `I couldn’t find an order with number ${orderNumber}. Please double-check it.`;
-  }
-  return (
-    `📦 Order ${order.name}\n` +
-    `Status: ${order.fulfillmentStatus || "Not fulfilled"}\n` +
-    `Payment: ${order.financialStatus}\n\n` +
-    `Would you like help with cancellation or returns?`
-  );
+/* -----------------------------
+   Helpers
+-------------------------------- */
+function extractOrderNumber(text) {
+  const match = text.match(/\d{3,}/);
+  return match ? match[0] : null;
 }
 
+function capabilityReply(context) {
+  if (context.cart && context.cart.item_count > 0) {
+    return "I can help review your cart or guide you to checkout.";
+  }
+
+  if (context.product) {
+    return "I can help with product details or adding this item to your cart.";
+  }
+
+  return "I can help track an order, check your cart, or find a product.";
+}
+
+function handleProductQuery(context) {
+  const p = context.product;
+  return `You're viewing ${p.title}, priced at ₹${p.price / 100}. Would you like details, compatibility info, or to add it to your cart?`;
+}
+
+/* -----------------------------
+   Shopify order lookup
+-------------------------------- */
 async function fetchOrderByNumber(orderNumber) {
-  const query = `
-    {
-      orders(first: 1, query: "name:#${orderNumber}") {
-        edges {
-          node {
-            name
-            financialStatus
-            fulfillmentStatus
-          }
+  const url = `https://${process.env.SHOPIFY_STORE}/admin/api/2023-10/orders.json?name=${orderNumber}`;
+
+  const res = await fetch(url, {
+    headers: {
+      "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN,
+      "Content-Type": "application/json"
+    }
+  });
+
+  const data = await res.json();
+  return data.orders && data.orders.length ? data.orders[0] : null;
+}
+
+/* -----------------------------
+   Main handler
+-------------------------------- */
+export default async function handler(req, res) {
+  try {
+    const body = req.body || {};
+    const message = body.message || "";
+    const context = body.context || {};
+    const sessionId = body.session_id;
+
+    if (!sessionId) {
+      return res.status(400).json({ reply: "Session missing." });
+    }
+
+    if (!sessions[sessionId]) {
+      sessions[sessionId] = {
+        awaitingOrderNumber: false,
+        lastIntent: null
+      };
+    }
+
+    const session = sessions[sessionId];
+    const intent = detectIntent(message, context, session);
+
+    let reply = "";
+
+    switch (intent) {
+      case "track_order":
+        session.awaitingOrderNumber = true;
+        reply = "Sure 🙂 Please share your order number.";
+        break;
+
+      case "order_number_provided": {
+        const orderNumber = extractOrderNumber(message);
+        session.awaitingOrderNumber = false;
+
+        const order = await fetchOrderByNumber(orderNumber);
+
+        if (!order) {
+          reply = `I couldn’t find an order with number ${orderNumber}. Please double-check it.`;
+        } else {
+          reply = `Your order ${order.name} is currently ${order.fulfillment_status || "being processed"}.`;
         }
+        break;
       }
+
+      case "cart_status":
+        if (context.cart && context.cart.item_count > 0) {
+          reply = `You have ${context.cart.item_count} item(s) in your cart. Would you like to review or checkout?`;
+        } else {
+          reply = "Your cart is currently empty. Would you like help finding a product?";
+        }
+        break;
+
+      case "product_query":
+        reply = handleProductQuery(context);
+        break;
+
+      default:
+        reply = capabilityReply(context);
     }
-  `;
 
-  const res = await fetch(
-    `https://${process.env.SHOPIFY_STORE_DOMAIN}/admin/api/2024-01/graphql.json`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN
-      },
-      body: JSON.stringify({ query })
-    }
-  );
-
-  const json = await res.json();
-  return json?.data?.orders?.edges?.[0]?.node || null;
-}
-
-async function createConversation(sessionId) {
-  await fetch(
-    `https://api.smooch.io/v2/apps/${process.env.SUNSHINE_APP_ID}/users`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization:
-          "Basic " +
-          Buffer.from(
-            `${process.env.SUNSHINE_KEY_ID}:${process.env.SUNSHINE_KEY_SECRET}`
-          ).toString("base64")
-      },
-      body: JSON.stringify({ externalId: sessionId })
-    }
-  );
-
-  const res = await fetch(
-    `https://api.smooch.io/v2/apps/${process.env.SUNSHINE_APP_ID}/conversations`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization:
-          "Basic " +
-          Buffer.from(
-            `${process.env.SUNSHINE_KEY_ID}:${process.env.SUNSHINE_KEY_SECRET}`
-          ).toString("base64")
-      },
-      body: JSON.stringify({
-        type: "personal",
-        participants: [{ role: "user", userExternalId: sessionId }]
-      })
-    }
-  );
-
-  const json = await res.json();
-  return json.conversation.id;
-}
-
-async function sendMessage(conversationId, text, sender) {
-  await fetch(
-    `https://api.smooch.io/v2/conversations/${conversationId}/messages`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization:
-          "Basic " +
-          Buffer.from(
-            `${process.env.SUNSHINE_KEY_ID}:${process.env.SUNSHINE_KEY_SECRET}`
-          ).toString("base64")
-      },
-      body: JSON.stringify({
-        author: sender === "bot" ? { type: "business" } : { type: "user" },
-        content: { type: "text", text }
-      })
-    }
-  );
+    session.lastIntent = intent;
+    res.status(200).json({ reply });
+  } catch (err) {
+    console.error("CHAT MESSAGE ERROR:", err);
+    res.status(500).json({ reply: "Something went wrong. Please try again." });
+  }
 }
