@@ -35,11 +35,16 @@ export default async function handler(req, res) {
     }
 
     // Multiple active orders
-    if (activeOrders.length > 1) {
-      return res.json({
-        reply: `I see ${activeOrders.length} active orders. Which order would you like to know about specifically?`
-      });
-    }
+   if (activeOrders.length > 1) {
+  const orderNumbers = activeOrders
+    .map(o => `#${o.number}`)
+    .join(", ");
+
+  return res.json({
+    reply: `I see ${activeOrders.length} active orders: ${orderNumbers}. Which order would you like to know about?`
+  });
+}
+
 
     // Exactly one active order
     const order = activeOrders[0];
