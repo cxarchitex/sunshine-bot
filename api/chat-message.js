@@ -1,5 +1,4 @@
-// NOTE: Node 18+ on Vercel provides fetch globally
-// DO NOT import node-fetch
+// Vercel Node 18+ provides fetch globally
 
 const sessions = new Map();
 
@@ -22,18 +21,27 @@ export default async function handler(req, res) {
 
     const text = message.toLowerCase().trim();
 
-    // ---------- Session ----------
+    // ---------- Restore / init session ----------
     const session =
       sessions.get(conversationId) || {
         orders: [],
         selectedOrder: null
       };
 
-    // ---------- Detect order number ----------
-    const orderNumberMatch = text.match(/#?(\d{3,})/);
+    /*
+      =====================================================
+      1️⃣ ORDER NUMBER SELECTION (MUST COME FIRST)
+      =====================================================
+      Handles replies like:
+      20
+      #20
+      " 20 "
+    */
+    const orderNumberMatch = text.match(/^\s*#?(\d{1,6})\s*$/);
 
     if (orderNumberMatch && session.orders.length) {
       const num = orderNumberMatch[1];
+
       const found = session.orders.find(
         o => String(o.number) === num
       );
@@ -41,16 +49,25 @@ export default async function handler(req, res) {
       if (found) {
         session.selectedOrder = found;
         sessions.set(conversationId, session);
-        return res.json({ reply: buildOrderStatus(found) });
+
+        return res.json({
+          reply: buildOrderStatus(found)
+        });
       }
     }
 
-    // ---------- Track order intent ----------
-    if (
+    /*
+      =====================================================
+      2️⃣ TRACK ORDER INTENT
+      =====================================================
+    */
+    const isTrackIntent =
       text.includes("track") ||
       text.includes("where is") ||
-      text.includes("order status")
-    ) {
+      text.includes("order status") ||
+      text.includes("my order");
+
+    if (isTrackIntent) {
       // Logged-in user
       if (customer?.loggedIn && customer?.email) {
         if (!session.orders.length) {
@@ -92,13 +109,17 @@ export default async function handler(req, res) {
         });
       }
 
-      // Guest
+      // Guest user
       return res.json({
         reply: "Please share the email used for your order."
       });
     }
 
-    // ---------- Email capture (guest) ----------
+    /*
+      =====================================================
+      3️⃣ EMAIL CAPTURE (GUEST USERS)
+      =====================================================
+    */
     const emailMatch = text.match(
       /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/
     );
@@ -142,16 +163,25 @@ export default async function handler(req, res) {
       });
     }
 
-    // ---------- Follow-up ----------
+    /*
+      =====================================================
+      4️⃣ FOLLOW-UP QUESTIONS
+      =====================================================
+    */
     if (session.selectedOrder) {
       return res.json({
         reply: buildOrderStatus(session.selectedOrder)
       });
     }
 
+    /*
+      =====================================================
+      FALLBACK
+      =====================================================
+    */
     return res.json({
       reply:
-        "I can help you track orders, list orders, or check order status."
+        "I can help you track your order, list orders, or check order status."
     });
   } catch (err) {
     console.error(err);
@@ -161,14 +191,17 @@ export default async function handler(req, res) {
   }
 }
 
-/* ---------- Shopify Admin API ---------- */
-
+/*
+  =====================================================
+  SHOPIFY ADMIN API
+  =====================================================
+*/
 async function fetchOrders(email) {
   const store = process.env.SHOPIFY_STORE_DOMAIN;
   const token = process.env.SHOPIFY_ADMIN_TOKEN;
 
   if (!store || !token) {
-    throw new Error("Shopify env vars missing");
+    throw new Error("Shopify environment variables missing");
   }
 
   const url = `https://${store}/admin/api/2024-01/orders.json?status=any&email=${encodeURIComponent(
@@ -186,11 +219,14 @@ async function fetchOrders(email) {
   return data.orders || [];
 }
 
-/* ---------- Formatter ---------- */
-
+/*
+  =====================================================
+  ORDER RESPONSE FORMATTER
+  =====================================================
+*/
 function buildOrderStatus(order) {
   const tracking =
-    order.fulfillments?.[0]?.tracking_urls?.[0];
+    order.fulfillments?.[0]?.tracking_urls?.[0] || null;
 
   let reply = `Your order #${order.number} is currently ${
     order.fulfillment_status || "being processed"
