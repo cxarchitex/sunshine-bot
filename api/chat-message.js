@@ -42,9 +42,10 @@ export default async function handler(req, res) {
     if (orderNumberMatch && session.orders.length) {
       const num = orderNumberMatch[1];
 
-      const found = session.orders.find(
-        o => String(o.number) === num
-      );
+   const found = session.orders.find(o => {
+    const orderName = o.name?.replace("#", "");
+    return orderName === num;
+    });
 
       if (found) {
         session.selectedOrder = found;
