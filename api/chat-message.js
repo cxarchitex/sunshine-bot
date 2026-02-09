@@ -101,7 +101,7 @@ export default async function handler(req, res) {
         sessions.set(conversationId, session);
 
         const numbers = activeOrders
-          .map(o => `#${o.number}`)
+          .map(o => o.name)
           .join(", ");
 
         return res.json({
@@ -155,7 +155,7 @@ export default async function handler(req, res) {
       sessions.set(conversationId, session);
 
       const numbers = activeOrders
-        .map(o => `#${o.number}`)
+        .map(o => o.name)
         .join(", ");
 
       return res.json({
@@ -233,7 +233,7 @@ function buildOrderStatus(order) {
   const trackingUrl = fulfillment?.tracking_urls?.[0];
   const eta = fulfillment?.estimated_delivery_at;
 
-  let reply = `Your order #${order.number} is currently ${humanizeStatus(status)}.`;
+  let reply = `Your order ${order.number} is currently ${humanizeStatus(status)}.`;
 
   if (carrier) {
     reply += ` It’s being shipped via ${carrier}.`;
