@@ -1,4 +1,13 @@
+import fetch from "node-fetch";
+
+const SHOPIFY_STORE = process.env.SHOPIFY_STORE;
+const SHOPIFY_TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
+
+// simple in-memory session store (per Vercel instance)
+const sessions = new Map();
+
 export default async function handler(req, res) {
+  // ---- CORS ----
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -7,130 +16,181 @@ export default async function handler(req, res) {
     return res.status(200).end();
   }
 
-  const { message, customer } = req.body;
-  const text = (message || "").toLowerCase();
+  try {
+    const { message, conversationId, customer } = req.body;
 
-  const intent = detectIntent(text);
+    if (!conversationId) {
+      return res.status(400).json({ reply: "Missing conversation id." });
+    }
 
-  /* -----------------------------
-     TRACK ORDER INTENT
-  ------------------------------ */
-  if (intent === "TRACK_ORDER") {
-    // Not logged in and no email yet
-    if (!customer?.loggedIn && !customer?.email) {
+    const text = message.toLowerCase().trim();
+
+    // get or init session
+    const session =
+      sessions.get(conversationId) || {
+        selectedOrder: null,
+        orders: []
+      };
+
+    // ---------- FETCH ORDERS ON FIRST NEED ----------
+    async function fetchOrders(email) {
+      const url = `https://${SHOPIFY_STORE}/admin/api/2024-01/orders.json?status=any&email=${encodeURIComponent(
+        email
+      )}`;
+
+      const response = await fetch(url, {
+        headers: {
+          "X-Shopify-Access-Token": SHOPIFY_TOKEN
+        }
+      });
+
+      const data = await response.json();
+      return data.orders || [];
+    }
+
+    // ---------- DETECT ORDER NUMBER ----------
+    const orderNumberMatch = text.match(/#?(\d{3,})/);
+    if (orderNumberMatch && session.orders.length) {
+      const orderNum = orderNumberMatch[1];
+
+      const found = session.orders.find(
+        o => String(o.number) === orderNum
+      );
+
+      if (found) {
+        session.selectedOrder = found;
+        sessions.set(conversationId, session);
+
+        return res.json({
+          reply: buildOrderStatus(found)
+        });
+      }
+    }
+
+    // ---------- TRACK / WHERE IS ORDER ----------
+    if (
+      text.includes("track") ||
+      text.includes("where is") ||
+      text.includes("order")
+    ) {
+      // logged-in user
+      if (customer?.loggedIn && customer?.email) {
+        if (!session.orders.length) {
+          session.orders = await fetchOrders(customer.email);
+        }
+
+        const activeOrders = session.orders.filter(
+          o =>
+            o.fulfillment_status !== "fulfilled" &&
+            o.financial_status !== "refunded"
+        );
+
+        if (!activeOrders.length) {
+          sessions.set(conversationId, session);
+          return res.json({
+            reply:
+              "You have no active orders. Would you like to know about your past orders?"
+          });
+        }
+
+        if (activeOrders.length === 1) {
+          session.selectedOrder = activeOrders[0];
+          sessions.set(conversationId, session);
+          return res.json({
+            reply: buildOrderStatus(activeOrders[0])
+          });
+        }
+
+        const orderNumbers = activeOrders
+          .map(o => `#${o.number}`)
+          .join(", ");
+
+        session.orders = activeOrders;
+        sessions.set(conversationId, session);
+
+        return res.json({
+          reply: `I see ${activeOrders.length} active orders: ${orderNumbers}. Which order would you like to know about?`
+        });
+      }
+
+      // guest user
       return res.json({
-        reply: "Please share the email used for your orders."
+        reply: "Please share the email used for your order."
       });
     }
 
-    // Fetch active orders (mock for now)
-    const activeOrders = await getActiveOrders(customer);
+    // ---------- EMAIL CAPTURE (GUEST) ----------
+    const emailMatch = text.match(
+      /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/
+    );
 
-    // No active orders
-    if (activeOrders.length === 0) {
+    if (emailMatch) {
+      const email = emailMatch[0];
+      session.orders = await fetchOrders(email);
+
+      const activeOrders = session.orders.filter(
+        o =>
+          o.fulfillment_status !== "fulfilled" &&
+          o.financial_status !== "refunded"
+      );
+
+      if (!activeOrders.length) {
+        sessions.set(conversationId, session);
+        return res.json({
+          reply:
+            "There are no active orders for this email. Would you like to see past orders?"
+        });
+      }
+
+      if (activeOrders.length === 1) {
+        session.selectedOrder = activeOrders[0];
+        sessions.set(conversationId, session);
+        return res.json({
+          reply: buildOrderStatus(activeOrders[0])
+        });
+      }
+
+      session.orders = activeOrders;
+      sessions.set(conversationId, session);
+
+      const orderNumbers = activeOrders
+        .map(o => `#${o.number}`)
+        .join(", ");
+
       return res.json({
-        reply:
-          "You don’t have any active orders right now. Would you like to check your past orders?"
+        reply: `I see ${activeOrders.length} active orders: ${orderNumbers}. Which order would you like to know about?`
       });
     }
 
-    // Multiple active orders
-   if (activeOrders.length > 1) {
-  const orderNumbers = activeOrders
-    .map(o => `#${o.number}`)
-    .join(", ");
+    // ---------- FOLLOW UPS ----------
+    if (session.selectedOrder) {
+      return res.json({
+        reply: buildOrderStatus(session.selectedOrder)
+      });
+    }
 
-  return res.json({
-    reply: `I see ${activeOrders.length} active orders: ${orderNumbers}. Which order would you like to know about?`
-  });
-}
-
-
-    // Exactly one active order
-    const order = activeOrders[0];
     return res.json({
-      reply: `Your order #${order.number} is currently ${order.status}. You’ll receive it by ${order.delivery}.`
+      reply:
+        "I can help with tracking orders, listing orders, or checking products."
+    });
+  } catch (err) {
+    console.error(err);
+    return res.json({
+      reply: "Sorry, something went wrong while fetching your order."
     });
   }
-
-  /* -----------------------------
-     LIST ORDERS INTENT
-  ------------------------------ */
-  if (intent === "LIST_ORDERS") {
-    if (!customer?.loggedIn && !customer?.email) {
-      return res.json({
-        reply: "Please share the email used for your orders."
-      });
-    }
-
-    const orders = await getAllOrders(customer);
-
-    if (!orders.length) {
-      return res.json({
-        reply: "I couldn’t find any orders for you."
-      });
-    }
-
-    return res.json({
-      reply: orders
-        .map(o => `#${o.number} – ${o.status}`)
-        .join("\n")
-    });
-  }
-
-  /* -----------------------------
-     FALLBACK
-  ------------------------------ */
-  return res.json({
-    reply:
-      "I can help with tracking orders, listing orders, or checking products."
-  });
 }
 
-/* -----------------------------
-   INTENT DETECTION
------------------------------- */
-function detectIntent(text) {
-  if (
-    text.includes("track") ||
-    text.includes("where") ||
-    text.includes("order status")
-  ) {
-    return "TRACK_ORDER";
+// ---------- ORDER RESPONSE FORMAT ----------
+function buildOrderStatus(order) {
+  const tracking =
+    order.fulfillments?.[0]?.tracking_urls?.[0] || null;
+
+  let reply = `Your order #${order.number} is currently ${order.fulfillment_status || "being processed"}.`;
+
+  if (tracking) {
+    reply += ` You can track it here: ${tracking}`;
   }
 
-  if (text.includes("list") && text.includes("order")) {
-    return "LIST_ORDERS";
-  }
-
-  return "UNKNOWN";
-}
-
-/* -----------------------------
-   MOCK DATA (replace later)
------------------------------- */
-async function getActiveOrders(customer) {
-  // Example mock scenarios:
-  return [
-    {
-      number: 1020,
-      status: "being prepared for shipment",
-      delivery: "Feb 14"
-    },
-    {
-      number: 1023,
-      status: "out for delivery",
-      delivery: "Feb 10"
-    }
-  ];
-
-  // To test no active orders, return []
-  // To test single order, return [ { ... } ]
-}
-
-async function getAllOrders(customer) {
-  return [
-    { number: 1020, status: "Processing" },
-    { number: 1015, status: "Delivered" }
-  ];
+  return reply;
 }
