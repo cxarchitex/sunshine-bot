@@ -225,16 +225,46 @@ async function fetchOrders(email) {
   =====================================================
 */
 function buildOrderStatus(order) {
-  const tracking =
-    order.fulfillments?.[0]?.tracking_urls?.[0] || null;
+  const fulfillment = order.fulfillments?.[0];
 
-  let reply = `Your order #${order.number} is currently ${
-    order.fulfillment_status || "being processed"
-  }.`;
+  const status = order.fulfillment_status || "processing";
+  const carrier = fulfillment?.tracking_company;
+  const trackingNumber = fulfillment?.tracking_number;
+  const trackingUrl = fulfillment?.tracking_urls?.[0];
+  const eta = fulfillment?.estimated_delivery_at;
 
-  if (tracking) {
-    reply += ` You can track it here: ${tracking}`;
+  let reply = `Your order #${order.number} is currently ${humanizeStatus(status)}.`;
+
+  if (carrier) {
+    reply += ` It’s being shipped via ${carrier}.`;
+  }
+
+  if (trackingNumber) {
+    reply += ` Tracking number: ${trackingNumber}.`;
+  }
+
+  if (trackingUrl) {
+    reply += ` You can track it here: ${trackingUrl}`;
+  }
+
+  if (eta) {
+    const etaDate = new Date(eta).toLocaleDateString();
+    reply += ` Estimated delivery: ${etaDate}.`;
+  } else if (status === "fulfilled") {
+    reply += ` It’s on the way.`;
   }
 
   return reply;
+}
+function humanizeStatus(status) {
+  switch (status) {
+    case "unfulfilled":
+      return "being prepared for shipment";
+    case "partial":
+      return "partially shipped";
+    case "fulfilled":
+      return "shipped";
+    default:
+      return status;
+  }
 }
