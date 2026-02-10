@@ -30,23 +30,20 @@ export default async function handler(req, res) {
 
     /*
       =====================================================
-      1️⃣ ORDER NUMBER SELECTION (MUST COME FIRST)
+      1️⃣ ORDER NUMBER SELECTION (FIRST, ALWAYS)
       =====================================================
-      Handles replies like:
-      20
-      #20
-      " 20 "
     */
     const orderNumberMatch = text.match(/^\s*#?(\d{1,6})\s*$/);
 
     if (orderNumberMatch && session.orders.length) {
-      const num = orderNumberMatch[1];
+      const entered = orderNumberMatch[1];
 
-   const found = session.orders.find(o => {
-    const orderName = o.name?.replace("#", "");
-    return orderName === num;
-    });
+      const found = session.orders.find(o => {
+        const nameNum = o.name?.replace("#", "");
+        return nameNum === entered;
+      });
 
+      // ✅ Valid order selected
       if (found) {
         session.selectedOrder = found;
         sessions.set(conversationId, session);
@@ -55,6 +52,13 @@ export default async function handler(req, res) {
           reply: buildOrderStatus(found)
         });
       }
+
+      // ❌ Invalid order number
+      const validOrders = session.orders.map(o => o.name).join(", ");
+
+      return res.json({
+        reply: `That doesn’t look like one of your active orders. Please choose from: ${validOrders}`
+      });
     }
 
     /*
@@ -101,9 +105,7 @@ export default async function handler(req, res) {
         session.orders = activeOrders;
         sessions.set(conversationId, session);
 
-        const numbers = activeOrders
-          .map(o => o.name)
-          .join(", ");
+        const numbers = activeOrders.map(o => o.name).join(", ");
 
         return res.json({
           reply: `I see ${activeOrders.length} active orders: ${numbers}. Which order would you like to know about?`
@@ -155,9 +157,7 @@ export default async function handler(req, res) {
       session.orders = activeOrders;
       sessions.set(conversationId, session);
 
-      const numbers = activeOrders
-        .map(o => o.name)
-        .join(", ");
+      const numbers = activeOrders.map(o => o.name).join(", ");
 
       return res.json({
         reply: `I see ${activeOrders.length} active orders: ${numbers}. Which order would you like to know about?`
@@ -217,7 +217,11 @@ async function fetchOrders(email) {
   });
 
   const data = await res.json();
-  return data.orders || [];
+
+  // Sort newest first
+  return (data.orders || []).sort(
+    (a, b) => new Date(b.created_at) - new Date(a.created_at)
+  );
 }
 
 /*
@@ -234,7 +238,7 @@ function buildOrderStatus(order) {
   const trackingUrl = fulfillment?.tracking_urls?.[0];
   const eta = fulfillment?.estimated_delivery_at;
 
-  let reply = `Your order ${order.number} is currently ${humanizeStatus(status)}.`;
+  let reply = `Your order ${order.name} is currently ${humanizeStatus(status)}.`;
 
   if (carrier) {
     reply += ` It’s being shipped via ${carrier}.`;
@@ -257,6 +261,7 @@ function buildOrderStatus(order) {
 
   return reply;
 }
+
 function humanizeStatus(status) {
   switch (status) {
     case "unfulfilled":
