@@ -3,7 +3,7 @@
 const sessions = new Map();
 
 export default async function handler(req, res) {
-  // ---------- CORS ----------
+  // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -20,7 +20,7 @@ export default async function handler(req, res) {
 
     const text = message.toLowerCase().trim();
 
-    // ---------- Restore / init session ----------
+    // Restore or init session
     const session =
       sessions.get(conversationId) || {
         orders: [],
@@ -31,7 +31,7 @@ export default async function handler(req, res) {
 
     /*
       =====================================================
-      1️⃣ ORDER NUMBER SELECTION
+      1) ORDER NUMBER SELECTION (FIRST)
       =====================================================
     */
     const orderNumberMatch = text.match(/^\s*#?(\d{1,6})\s*$/);
@@ -39,9 +39,10 @@ export default async function handler(req, res) {
     if (orderNumberMatch && session.activeOrders.length) {
       const entered = orderNumberMatch[1];
 
-      const found = session.activeOrders.find(o =>
-        o.name?.replace("#", "") === entered
-      );
+      const found = session.activeOrders.find(o => {
+        const num = o.name?.replace("#", "");
+        return num === entered;
+      });
 
       if (found) {
         session.selectedOrder = found;
@@ -57,7 +58,7 @@ export default async function handler(req, res) {
 
     /*
       =====================================================
-      2️⃣ TRACK ORDER INTENT
+      2) TRACK ORDER INTENT
       =====================================================
     */
     const isTrackIntent =
@@ -83,7 +84,7 @@ export default async function handler(req, res) {
         sessions.set(conversationId, session);
         return res.json({
           reply:
-            "You don’t have any active orders. Would you like to see your past orders?"
+            "You don’t have any active orders right now. Would you like to see your past orders?"
         });
       }
 
@@ -105,7 +106,7 @@ export default async function handler(req, res) {
 
     /*
       =====================================================
-      3️⃣ PAST ORDERS REQUEST
+      3) PAST ORDERS REQUEST
       =====================================================
     */
     if (text.includes("past order") || text.includes("previous order")) {
@@ -117,7 +118,9 @@ export default async function handler(req, res) {
 
       const list = session.pastOrders
         .slice(0, 5)
-        .map(o => `${o.name} – ${humanizeFulfillmentStatus(o.fulfillment_status)}`)
+        .map(
+          o => `${o.name} – ${humanizeFulfillmentStatus(o.fulfillment_status)}`
+        )
         .join("\n");
 
       return res.json({
@@ -127,7 +130,7 @@ export default async function handler(req, res) {
 
     /*
       =====================================================
-      4️⃣ FOLLOW-UP QUESTIONS
+      4) FOLLOW-UP QUESTIONS
       =====================================================
     */
     if (session.selectedOrder) {
@@ -156,6 +159,10 @@ export default async function handler(req, res) {
 async function fetchOrders(email) {
   const store = process.env.SHOPIFY_STORE_DOMAIN;
   const token = process.env.SHOPIFY_ADMIN_TOKEN;
+
+  if (!store || !token) {
+    throw new Error("Shopify environment variables missing");
+  }
 
   const url = `https://${store}/admin/api/2024-01/orders.json?status=any&email=${encodeURIComponent(
     email
@@ -218,10 +225,12 @@ function buildOrderStatus(order) {
 
   if (!f) {
     reply += "It’s currently being prepared for shipment.";
-    return reply;
+    return reply.trim();
   }
 
-  reply += `Current status: ${humanizeFulfillmentStatus(f.status)}. `;
+  reply += `Current status: ${humanizeFulfillmentStatus(
+    f.status || order.fulfillment_status
+  )}. `;
 
   if (f.tracking_company) {
     reply += `Shipped via ${f.tracking_company}. `;
@@ -251,7 +260,10 @@ function buildOrderStatus(order) {
 function humanizeFulfillmentStatus(status) {
   switch (status) {
     case "pending":
+    case "unfulfilled":
       return "being prepared for shipment";
+    case "partial":
+      return "partially shipped";
     case "open":
       return "ready to ship";
     case "in_transit":
