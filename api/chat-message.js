@@ -3,7 +3,7 @@
 const sessions = new Map();
 
 export default async function handler(req, res) {
-  // CORS
+  // ---------- CORS ----------
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -20,7 +20,7 @@ export default async function handler(req, res) {
 
     const text = message.toLowerCase().trim();
 
-    // Restore or init session
+    // ---------- Restore / init session ----------
     const session =
       sessions.get(conversationId) || {
         orders: [],
@@ -31,7 +31,7 @@ export default async function handler(req, res) {
 
     /*
       =====================================================
-      1) ORDER NUMBER SELECTION (FIRST)
+      1️⃣ ORDER NUMBER SELECTION (ALWAYS FIRST)
       =====================================================
     */
     const orderNumberMatch = text.match(/^\s*#?(\d{1,6})\s*$/);
@@ -39,10 +39,9 @@ export default async function handler(req, res) {
     if (orderNumberMatch && session.activeOrders.length) {
       const entered = orderNumberMatch[1];
 
-      const found = session.activeOrders.find(o => {
-        const num = o.name?.replace("#", "");
-        return num === entered;
-      });
+      const found = session.activeOrders.find(o =>
+        o.name?.replace("#", "") === entered
+      );
 
       if (found) {
         session.selectedOrder = found;
@@ -58,7 +57,21 @@ export default async function handler(req, res) {
 
     /*
       =====================================================
-      2) TRACK ORDER INTENT
+      2️⃣ LATEST / MOST RECENT ORDER
+      =====================================================
+    */
+    if (isLatestOrderIntent(text) && session.activeOrders.length) {
+      session.selectedOrder = session.activeOrders[0];
+      sessions.set(conversationId, session);
+
+      return res.json({
+        reply: buildOrderStatus(session.selectedOrder)
+      });
+    }
+
+    /*
+      =====================================================
+      3️⃣ TRACK ORDER INTENT
       =====================================================
     */
     const isTrackIntent =
@@ -106,42 +119,28 @@ export default async function handler(req, res) {
 
     /*
       =====================================================
-      3) PAST ORDERS REQUEST
+      4️⃣ SHIPMENT FOLLOW-UP QUESTIONS
       =====================================================
     */
-    if (text.includes("past order") || text.includes("previous order")) {
-      if (!session.pastOrders.length) {
-        return res.json({
-          reply: "You don’t have any past orders."
-        });
+    if (session.selectedOrder && isShipmentFollowUp(text)) {
+      let reply = buildOrderStatus(session.selectedOrder);
+
+      if (isDelayed(session.selectedOrder)) {
+        reply +=
+          " This order is taking a bit longer than usual, but it’s still in progress.";
       }
 
-      const list = session.pastOrders
-        .slice(0, 5)
-        .map(
-          o => `${o.name} – ${humanizeFulfillmentStatus(o.fulfillment_status)}`
-        )
-        .join("\n");
-
-      return res.json({
-        reply: `Here are your recent past orders:\n${list}`
-      });
+      return res.json({ reply });
     }
 
     /*
       =====================================================
-      4) FOLLOW-UP QUESTIONS
+      FALLBACK
       =====================================================
     */
-    if (session.selectedOrder) {
-      return res.json({
-        reply: buildOrderStatus(session.selectedOrder)
-      });
-    }
-
     return res.json({
       reply:
-        "I can help you track orders, check delivery status, or view past orders."
+        "I can help you track your order, check delivery status, or view past orders."
     });
   } catch (err) {
     console.error(err);
@@ -208,70 +207,71 @@ function splitOrders(session) {
   =====================================================
 */
 function buildOrderStatus(order) {
-  const fulfillments = order.fulfillments || [];
-  const items = order.line_items || [];
+  const fulfillment = order.fulfillments?.[0];
 
-  const itemSummary = items
-    .map(i => `${i.quantity} × ${i.title}`)
-    .join(", ");
+  let reply = `Your order ${order.name} is currently ${humanizeStatus(
+    fulfillment?.status || order.fulfillment_status
+  )}.`;
 
-  let reply = `Your order ${order.name} includes ${itemSummary}. `;
-
-  if (fulfillments.length > 1) {
-    reply += `Part of your order has shipped and the rest is being prepared. `;
+  if (fulfillment?.tracking_company) {
+    reply += ` It’s being shipped via ${fulfillment.tracking_company}.`;
   }
 
-  const f = fulfillments[0];
-
-  if (!f) {
-    reply += "It’s currently being prepared for shipment.";
-    return reply.trim();
+  if (fulfillment?.tracking_number) {
+    reply += ` Tracking number: ${fulfillment.tracking_number}.`;
   }
 
-  reply += `Current status: ${humanizeFulfillmentStatus(
-    f.status || order.fulfillment_status
-  )}. `;
-
-  if (f.tracking_company) {
-    reply += `Shipped via ${f.tracking_company}. `;
+  if (fulfillment?.tracking_urls?.[0]) {
+    reply += ` You can track it here: ${fulfillment.tracking_urls[0]}`;
   }
 
-  if (f.tracking_number) {
-    reply += `Tracking number: ${f.tracking_number}. `;
-  }
-
-  if (f.tracking_urls?.[0]) {
-    reply += `Track here: ${f.tracking_urls[0]} `;
-  }
-
-  if (f.estimated_delivery_at) {
-    reply += `Estimated delivery: ${new Date(
-      f.estimated_delivery_at
-    ).toLocaleDateString()}.`;
-  } else if (f.delivered_at) {
-    reply += `Delivered on ${new Date(
-      f.delivered_at
-    ).toLocaleDateString()}.`;
-  }
-
-  return reply.trim();
+  return reply;
 }
 
-function humanizeFulfillmentStatus(status) {
+/*
+  =====================================================
+  PHASE 1 HELPERS
+  =====================================================
+*/
+function isLatestOrderIntent(text) {
+  return (
+    text.includes("latest") ||
+    text.includes("most recent") ||
+    text.includes("last order")
+  );
+}
+
+function isShipmentFollowUp(text) {
+  return (
+    text.includes("shipped") ||
+    text.includes("arrive") ||
+    text.includes("delivery") ||
+    text.includes("where is it")
+  );
+}
+
+function isDelayed(order) {
+  const created = new Date(order.created_at);
+  const days =
+    (Date.now() - created.getTime()) / (1000 * 60 * 60 * 24);
+
+  return (
+    order.fulfillment_status === "unfulfilled" &&
+    days > 5
+  );
+}
+
+function humanizeStatus(status) {
   switch (status) {
     case "pending":
     case "unfulfilled":
       return "being prepared for shipment";
     case "partial":
       return "partially shipped";
-    case "open":
-      return "ready to ship";
-    case "in_transit":
-      return "on the way";
-    case "delivered":
-      return "delivered";
     case "fulfilled":
       return "shipped";
+    case "in_transit":
+      return "on the way";
     default:
       return status || "processing";
   }
