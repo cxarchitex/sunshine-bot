@@ -3,14 +3,11 @@
 const sessions = new Map();
 
 export default async function handler(req, res) {
-  // ---------- CORS ----------
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
+  if (req.method === "OPTIONS") return res.status(200).end();
 
   try {
     const { message, conversationId, customer } = req.body || {};
@@ -20,7 +17,6 @@ export default async function handler(req, res) {
 
     const text = message.toLowerCase().trim();
 
-    // ---------- Restore / init session ----------
     const session =
       sessions.get(conversationId) || {
         orders: [],
@@ -31,14 +27,13 @@ export default async function handler(req, res) {
 
     /*
       =====================================================
-      1️⃣ ORDER NUMBER SELECTION (ALWAYS FIRST)
+      1️⃣ ORDER NUMBER SELECTION
       =====================================================
     */
     const orderNumberMatch = text.match(/^\s*#?(\d{1,6})\s*$/);
 
     if (orderNumberMatch && session.activeOrders.length) {
       const entered = orderNumberMatch[1];
-
       const found = session.activeOrders.find(
         o => o.name?.replace("#", "") === entered
       );
@@ -49,44 +44,76 @@ export default async function handler(req, res) {
         return res.json({ reply: buildOrderStatus(found) });
       }
 
-      const valid = session.activeOrders.map(o => o.name).join(", ");
       return res.json({
-        reply: `That doesn’t look like one of your active orders. Please choose from: ${valid}`
+        reply: `That doesn’t match an active order. Please choose from ${session.activeOrders
+          .map(o => o.name)
+          .join(", ")}`
       });
     }
 
     /*
       =====================================================
-      2️⃣ LATEST / MOST RECENT ORDER
+      2️⃣ LATEST ORDER
       =====================================================
     */
     if (isLatestOrderIntent(text) && session.activeOrders.length) {
       session.selectedOrder = session.activeOrders[0];
       sessions.set(conversationId, session);
+      return res.json({ reply: buildOrderStatus(session.selectedOrder) });
+    }
+
+    /*
+      =====================================================
+      3️⃣ FOLLOW-UPS
+      =====================================================
+    */
+    if (session.selectedOrder && isShipmentFollowUp(text)) {
       return res.json({
-        reply: buildOrderStatus(session.selectedOrder)
+        reply: enrichOrderStatus(session.selectedOrder)
       });
     }
 
     /*
       =====================================================
-      3️⃣ FOLLOW-UP QUESTIONS (MUST COME BEFORE TRACK INTENT)
+      4️⃣ CANCELLATION
       =====================================================
     */
-    if (session.selectedOrder && isShipmentFollowUp(text)) {
-      let reply = buildOrderStatus(session.selectedOrder);
-
-      if (isDelayed(session.selectedOrder)) {
-        reply +=
-          " This order is taking a bit longer than usual, but it’s still in progress.";
+    if (session.selectedOrder && isCancelIntent(text)) {
+      if (canCancel(session.selectedOrder)) {
+        return res.json({
+          reply:
+            "This order hasn’t shipped yet, so it can still be cancelled. Would you like me to help you with that?"
+        });
       }
 
-      return res.json({ reply });
+      return res.json({
+        reply:
+          "This order has already shipped, so it can’t be cancelled. You can request a return once it’s delivered."
+      });
     }
 
     /*
       =====================================================
-      4️⃣ TRACK ORDER INTENT (START FLOW)
+      5️⃣ RETURNS
+      =====================================================
+    */
+    if (session.selectedOrder && isReturnIntent(text)) {
+      if (canReturn(session.selectedOrder)) {
+        return res.json({
+          reply:
+            "This order is eligible for return. You can initiate a return from your account or I can guide you through the steps."
+        });
+      }
+
+      return res.json({
+        reply:
+          "This order isn’t eligible for return yet. Returns are available after delivery."
+      });
+    }
+
+    /*
+      =====================================================
+      6️⃣ TRACK / LIST ORDERS
       =====================================================
     */
     const isTrackIntent =
@@ -113,7 +140,7 @@ export default async function handler(req, res) {
         sessions.set(conversationId, session);
         return res.json({
           reply:
-            "You don’t have any active orders right now. Would you like to see your past orders?"
+            "You don’t have any active orders. Would you like to see your past orders or browse our latest products?"
         });
       }
 
@@ -125,57 +152,48 @@ export default async function handler(req, res) {
         });
       }
 
-      const list = session.activeOrders.map(o => o.name).join(", ");
       sessions.set(conversationId, session);
-
       return res.json({
-        reply: `I see ${session.activeOrders.length} active orders: ${list}. Which one would you like to check?`
+        reply: `I see ${session.activeOrders.length} active orders: ${session.activeOrders
+          .map(o => o.name)
+          .join(", ")}. Which one would you like to check?`
       });
     }
 
-    /*
-      =====================================================
-      FALLBACK
-      =====================================================
-    */
     return res.json({
       reply:
-        "I can help you track your order, check delivery status, or view past orders."
+        "I can help with order tracking, cancellations, returns, or delivery updates."
     });
   } catch (err) {
     console.error(err);
     return res.json({
-      reply: "Sorry, something went wrong while fetching your order."
+      reply: "Sorry, something went wrong while handling your request."
     });
   }
 }
 
 /*
   =====================================================
-  SHOPIFY ADMIN API
+  SHOPIFY API
   =====================================================
 */
 async function fetchOrders(email) {
   const store = process.env.SHOPIFY_STORE_DOMAIN;
   const token = process.env.SHOPIFY_ADMIN_TOKEN;
 
-  if (!store || !token) {
-    throw new Error("Shopify environment variables missing");
-  }
-
-  const url = `https://${store}/admin/api/2024-01/orders.json?status=any&email=${encodeURIComponent(
-    email
-  )}`;
-
-  const res = await fetch(url, {
-    headers: {
-      "X-Shopify-Access-Token": token,
-      "Content-Type": "application/json"
+  const res = await fetch(
+    `https://${store}/admin/api/2024-01/orders.json?status=any&email=${encodeURIComponent(
+      email
+    )}`,
+    {
+      headers: {
+        "X-Shopify-Access-Token": token,
+        "Content-Type": "application/json"
+      }
     }
-  });
+  );
 
   const data = await res.json();
-
   return (data.orders || []).sort(
     (a, b) => new Date(b.created_at) - new Date(a.created_at)
   );
@@ -183,7 +201,7 @@ async function fetchOrders(email) {
 
 /*
   =====================================================
-  ORDER SPLITTING
+  HELPERS
   =====================================================
 */
 function splitOrders(session) {
@@ -201,83 +219,73 @@ function splitOrders(session) {
   );
 }
 
-/*
-  =====================================================
-  ORDER RESPONSE FORMATTER
-  =====================================================
-*/
 function buildOrderStatus(order) {
-  const fulfillment = order.fulfillments?.[0];
-  const status = fulfillment?.status || order.fulfillment_status;
+  const items = order.line_items
+    .map(i => `${i.quantity} × ${i.title}`)
+    .join(", ");
 
-  // Not shipped yet
-  if (!fulfillment) {
-    return `Your order ${order.name} is currently being prepared for shipment. It hasn’t shipped yet, but it’s in progress. You’ll receive tracking details as soon as it’s dispatched.`;
+  return `Your order ${order.name} includes ${items}. ${enrichOrderStatus(
+    order
+  )}`;
+}
+
+function enrichOrderStatus(order) {
+  const f = order.fulfillments?.[0];
+
+  if (!f) {
+    return "It’s being prepared for shipment. You’ll receive tracking details once it’s dispatched.";
   }
 
-  let reply = `Your order ${order.name} is currently ${humanizeStatus(
-    status
-  )}.`;
+  let reply = `Current status: ${humanizeStatus(
+    f.status || order.fulfillment_status
+  )}. `;
 
-  if (fulfillment.tracking_company) {
-    reply += ` It’s being shipped via ${fulfillment.tracking_company}.`;
-  }
+  if (f.tracking_company) reply += `Carrier: ${f.tracking_company}. `;
+  if (f.tracking_number) reply += `Tracking number: ${f.tracking_number}. `;
+  if (f.tracking_urls?.[0])
+    reply += `Track here: ${f.tracking_urls[0]} `;
 
-  if (fulfillment.tracking_number) {
-    reply += ` Tracking number: ${fulfillment.tracking_number}.`;
-  }
-
-  if (fulfillment.tracking_urls?.[0]) {
-    reply += ` You can track it here: ${fulfillment.tracking_urls[0]}`;
-  }
-
-  if (fulfillment.estimated_delivery_at) {
-    reply += ` Estimated delivery: ${new Date(
-      fulfillment.estimated_delivery_at
+  if (f.estimated_delivery_at) {
+    reply += `Estimated delivery: ${new Date(
+      f.estimated_delivery_at
     ).toLocaleDateString()}.`;
   }
 
   return reply;
 }
 
-/*
-  =====================================================
-  PHASE 1 HELPERS
-  =====================================================
-*/
+function canCancel(order) {
+  return !order.fulfillments?.length;
+}
+
+function canReturn(order) {
+  return order.fulfillment_status === "fulfilled";
+}
+
 function isLatestOrderIntent(text) {
-  return (
-    text.includes("latest") ||
-    text.includes("most recent") ||
-    text.includes("last order")
-  );
+  return text.includes("latest") || text.includes("recent") || text.includes("last");
 }
 
 function isShipmentFollowUp(text) {
   return (
-    text.includes("shipped") ||
-    text.includes("arrive") ||
-    text.includes("delivery") ||
-    text.includes("where is it")
+    text.includes("where is it") ||
+    text.includes("has it shipped") ||
+    text.includes("delivery")
   );
 }
 
-function isDelayed(order) {
-  const created = new Date(order.created_at);
-  const days =
-    (Date.now() - created.getTime()) / (1000 * 60 * 60 * 24);
+function isCancelIntent(text) {
+  return text.includes("cancel");
+}
 
-  return (
-    order.fulfillment_status === "unfulfilled" &&
-    days > 5
-  );
+function isReturnIntent(text) {
+  return text.includes("return");
 }
 
 function humanizeStatus(status) {
   switch (status) {
-    case "pending":
     case "unfulfilled":
-      return "being prepared for shipment";
+      return "being prepared";
     case "partial":
       return "partially shipped";
     case "fulfilled":
