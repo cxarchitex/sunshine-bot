@@ -39,8 +39,8 @@ export default async function handler(req, res) {
     if (orderNumberMatch && session.activeOrders.length) {
       const entered = orderNumberMatch[1];
 
-      const found = session.activeOrders.find(o =>
-        o.name?.replace("#", "") === entered
+      const found = session.activeOrders.find(
+        o => o.name?.replace("#", "") === entered
       );
 
       if (found) {
@@ -63,7 +63,6 @@ export default async function handler(req, res) {
     if (isLatestOrderIntent(text) && session.activeOrders.length) {
       session.selectedOrder = session.activeOrders[0];
       sessions.set(conversationId, session);
-
       return res.json({
         reply: buildOrderStatus(session.selectedOrder)
       });
@@ -71,14 +70,31 @@ export default async function handler(req, res) {
 
     /*
       =====================================================
-      3️⃣ TRACK ORDER INTENT
+      3️⃣ FOLLOW-UP QUESTIONS (MUST COME BEFORE TRACK INTENT)
+      =====================================================
+    */
+    if (session.selectedOrder && isShipmentFollowUp(text)) {
+      let reply = buildOrderStatus(session.selectedOrder);
+
+      if (isDelayed(session.selectedOrder)) {
+        reply +=
+          " This order is taking a bit longer than usual, but it’s still in progress.";
+      }
+
+      return res.json({ reply });
+    }
+
+    /*
+      =====================================================
+      4️⃣ TRACK ORDER INTENT (START FLOW)
       =====================================================
     */
     const isTrackIntent =
       text.includes("track") ||
       text.includes("where is") ||
       text.includes("order status") ||
-      text.includes("my order");
+      text.includes("my order") ||
+      text.includes("list my orders");
 
     if (isTrackIntent) {
       if (!customer?.loggedIn || !customer?.email) {
@@ -115,22 +131,6 @@ export default async function handler(req, res) {
       return res.json({
         reply: `I see ${session.activeOrders.length} active orders: ${list}. Which one would you like to check?`
       });
-    }
-
-    /*
-      =====================================================
-      4️⃣ SHIPMENT FOLLOW-UP QUESTIONS
-      =====================================================
-    */
-    if (session.selectedOrder && isShipmentFollowUp(text)) {
-      let reply = buildOrderStatus(session.selectedOrder);
-
-      if (isDelayed(session.selectedOrder)) {
-        reply +=
-          " This order is taking a bit longer than usual, but it’s still in progress.";
-      }
-
-      return res.json({ reply });
     }
 
     /*
