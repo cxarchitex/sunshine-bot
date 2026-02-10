@@ -232,18 +232,24 @@ async function fetchOrders(email) {
 function buildOrderStatus(order) {
   const fulfillment = order.fulfillments?.[0];
 
-  const status = order.fulfillment_status || "processing";
+  const orderName = order.name;
+  const fulfillmentStatus = fulfillment?.status || order.fulfillment_status;
   const carrier = fulfillment?.tracking_company;
   const trackingNumber = fulfillment?.tracking_number;
   const trackingUrl = fulfillment?.tracking_urls?.[0];
   const eta = fulfillment?.estimated_delivery_at;
+  const fulfilledAt = fulfillment?.fulfilled_at;
 
-  let reply = `Your order ${order.name} is currently ${humanizeStatus(status)}.`;
+  let reply = `Your order ${orderName} is currently ${humanizeFulfillmentStatus(
+    fulfillmentStatus
+  )}.`;
 
+  // Carrier
   if (carrier) {
     reply += ` It’s being shipped via ${carrier}.`;
   }
 
+  // Tracking
   if (trackingNumber) {
     reply += ` Tracking number: ${trackingNumber}.`;
   }
@@ -252,25 +258,36 @@ function buildOrderStatus(order) {
     reply += ` You can track it here: ${trackingUrl}`;
   }
 
+  // ETA handling
   if (eta) {
     const etaDate = new Date(eta).toLocaleDateString();
     reply += ` Estimated delivery: ${etaDate}.`;
-  } else if (status === "fulfilled") {
-    reply += ` It’s on the way.`;
+  } else if (fulfilledAt) {
+    const shipDate = new Date(fulfilledAt).toLocaleDateString();
+    reply += ` It shipped on ${shipDate}.`;
+  } else {
+    reply += ` We’ll notify you as soon as it ships.`;
   }
 
   return reply;
 }
 
-function humanizeStatus(status) {
+
+function humanizeFulfillmentStatus(status) {
   switch (status) {
-    case "unfulfilled":
+    case "pending":
       return "being prepared for shipment";
-    case "partial":
-      return "partially shipped";
+    case "open":
+      return "ready to ship";
+    case "in_transit":
+      return "on the way";
+    case "delivered":
+      return "delivered";
+    case "cancelled":
+      return "cancelled";
     case "fulfilled":
       return "shipped";
     default:
-      return status;
+      return status || "processing";
   }
 }
