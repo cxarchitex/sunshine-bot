@@ -14,7 +14,6 @@ export default async function handler(req, res) {
 
   try {
     const { message, conversationId, customer } = req.body || {};
-
     if (!conversationId || !message) {
       return res.json({ reply: "Invalid request." });
     }
@@ -25,39 +24,34 @@ export default async function handler(req, res) {
     const session =
       sessions.get(conversationId) || {
         orders: [],
+        activeOrders: [],
+        pastOrders: [],
         selectedOrder: null
       };
 
     /*
       =====================================================
-      1️⃣ ORDER NUMBER SELECTION (FIRST, ALWAYS)
+      1️⃣ ORDER NUMBER SELECTION
       =====================================================
     */
     const orderNumberMatch = text.match(/^\s*#?(\d{1,6})\s*$/);
 
-    if (orderNumberMatch && session.orders.length) {
+    if (orderNumberMatch && session.activeOrders.length) {
       const entered = orderNumberMatch[1];
 
-      const found = session.orders.find(o => {
-        const nameNum = o.name?.replace("#", "");
-        return nameNum === entered;
-      });
+      const found = session.activeOrders.find(o =>
+        o.name?.replace("#", "") === entered
+      );
 
-      // ✅ Valid order selected
       if (found) {
         session.selectedOrder = found;
         sessions.set(conversationId, session);
-
-        return res.json({
-          reply: buildOrderStatus(found)
-        });
+        return res.json({ reply: buildOrderStatus(found) });
       }
 
-      // ❌ Invalid order number
-      const validOrders = session.orders.map(o => o.name).join(", ");
-
+      const valid = session.activeOrders.map(o => o.name).join(", ");
       return res.json({
-        reply: `That doesn’t look like one of your active orders. Please choose from: ${validOrders}`
+        reply: `That doesn’t look like one of your active orders. Please choose from: ${valid}`
       });
     }
 
@@ -73,94 +67,61 @@ export default async function handler(req, res) {
       text.includes("my order");
 
     if (isTrackIntent) {
-      // Logged-in user
-      if (customer?.loggedIn && customer?.email) {
-        if (!session.orders.length) {
-          session.orders = await fetchOrders(customer.email);
-        }
-
-        const activeOrders = session.orders.filter(
-          o =>
-            !o.cancelled_at &&
-            o.fulfillment_status !== "fulfilled" &&
-            o.financial_status !== "refunded"
-        );
-
-        if (!activeOrders.length) {
-          sessions.set(conversationId, session);
-          return res.json({
-            reply:
-              "You don’t have any active orders right now. Would you like to know about your past orders?"
-          });
-        }
-
-        if (activeOrders.length === 1) {
-          session.selectedOrder = activeOrders[0];
-          sessions.set(conversationId, session);
-          return res.json({
-            reply: buildOrderStatus(activeOrders[0])
-          });
-        }
-
-        session.orders = activeOrders;
-        sessions.set(conversationId, session);
-
-        const numbers = activeOrders.map(o => o.name).join(", ");
-
+      if (!customer?.loggedIn || !customer?.email) {
         return res.json({
-          reply: `I see ${activeOrders.length} active orders: ${numbers}. Which order would you like to know about?`
+          reply: "Please share the email used for your order."
         });
       }
 
-      // Guest user
+      if (!session.orders.length) {
+        session.orders = await fetchOrders(customer.email);
+      }
+
+      splitOrders(session);
+
+      if (!session.activeOrders.length) {
+        sessions.set(conversationId, session);
+        return res.json({
+          reply:
+            "You don’t have any active orders. Would you like to see your past orders?"
+        });
+      }
+
+      if (session.activeOrders.length === 1) {
+        session.selectedOrder = session.activeOrders[0];
+        sessions.set(conversationId, session);
+        return res.json({
+          reply: buildOrderStatus(session.selectedOrder)
+        });
+      }
+
+      const list = session.activeOrders.map(o => o.name).join(", ");
+      sessions.set(conversationId, session);
+
       return res.json({
-        reply: "Please share the email used for your order."
+        reply: `I see ${session.activeOrders.length} active orders: ${list}. Which one would you like to check?`
       });
     }
 
     /*
       =====================================================
-      3️⃣ EMAIL CAPTURE (GUEST USERS)
+      3️⃣ PAST ORDERS REQUEST
       =====================================================
     */
-    const emailMatch = text.match(
-      /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/
-    );
-
-    if (emailMatch) {
-      const email = emailMatch[0];
-      session.orders = await fetchOrders(email);
-
-      const activeOrders = session.orders.filter(
-        o =>
-          !o.cancelled_at &&
-          o.fulfillment_status !== "fulfilled" &&
-          o.financial_status !== "refunded"
-      );
-
-      if (!activeOrders.length) {
-        sessions.set(conversationId, session);
+    if (text.includes("past order") || text.includes("previous order")) {
+      if (!session.pastOrders.length) {
         return res.json({
-          reply:
-            "There are no active orders for this email. Would you like to know about your past orders?"
+          reply: "You don’t have any past orders."
         });
       }
 
-      if (activeOrders.length === 1) {
-        session.selectedOrder = activeOrders[0];
-        sessions.set(conversationId, session);
-        return res.json({
-          reply: buildOrderStatus(activeOrders[0])
-        });
-      }
-
-      session.orders = activeOrders;
-      sessions.set(conversationId, session);
-
-      const numbers = activeOrders.map(o => o.name).join(", ");
+      const list = session.pastOrders
+        .slice(0, 5)
+        .map(o => `${o.name} – ${humanizeFulfillmentStatus(o.fulfillment_status)}`)
+        .join("\n");
 
       return res.json({
-        reply: `I see ${activeOrders.length} active orders: ${numbers}. Which order would you like to know about?`
+        reply: `Here are your recent past orders:\n${list}`
       });
     }
 
@@ -175,14 +136,9 @@ export default async function handler(req, res) {
       });
     }
 
-    /*
-      =====================================================
-      FALLBACK
-      =====================================================
-    */
     return res.json({
       reply:
-        "I can help you track your order, list orders, or check order status."
+        "I can help you track orders, check delivery status, or view past orders."
     });
   } catch (err) {
     console.error(err);
@@ -201,10 +157,6 @@ async function fetchOrders(email) {
   const store = process.env.SHOPIFY_STORE_DOMAIN;
   const token = process.env.SHOPIFY_ADMIN_TOKEN;
 
-  if (!store || !token) {
-    throw new Error("Shopify environment variables missing");
-  }
-
   const url = `https://${store}/admin/api/2024-01/orders.json?status=any&email=${encodeURIComponent(
     email
   )}`;
@@ -218,9 +170,28 @@ async function fetchOrders(email) {
 
   const data = await res.json();
 
-  // Sort newest first
   return (data.orders || []).sort(
     (a, b) => new Date(b.created_at) - new Date(a.created_at)
+  );
+}
+
+/*
+  =====================================================
+  ORDER SPLITTING
+  =====================================================
+*/
+function splitOrders(session) {
+  session.activeOrders = session.orders.filter(
+    o =>
+      !o.cancelled_at &&
+      o.fulfillment_status !== "fulfilled" &&
+      o.financial_status !== "refunded"
+  );
+
+  session.pastOrders = session.orders.filter(
+    o =>
+      o.fulfillment_status === "fulfilled" ||
+      o.financial_status === "refunded"
   );
 }
 
@@ -230,48 +201,52 @@ async function fetchOrders(email) {
   =====================================================
 */
 function buildOrderStatus(order) {
-  const fulfillment = order.fulfillments?.[0];
+  const fulfillments = order.fulfillments || [];
+  const items = order.line_items || [];
 
-  const orderName = order.name;
-  const fulfillmentStatus = fulfillment?.status || order.fulfillment_status;
-  const carrier = fulfillment?.tracking_company;
-  const trackingNumber = fulfillment?.tracking_number;
-  const trackingUrl = fulfillment?.tracking_urls?.[0];
-  const eta = fulfillment?.estimated_delivery_at;
-  const fulfilledAt = fulfillment?.fulfilled_at;
+  const itemSummary = items
+    .map(i => `${i.quantity} × ${i.title}`)
+    .join(", ");
 
-  let reply = `Your order ${orderName} is currently ${humanizeFulfillmentStatus(
-    fulfillmentStatus
-  )}.`;
+  let reply = `Your order ${order.name} includes ${itemSummary}. `;
 
-  // Carrier
-  if (carrier) {
-    reply += ` It’s being shipped via ${carrier}.`;
+  if (fulfillments.length > 1) {
+    reply += `Part of your order has shipped and the rest is being prepared. `;
   }
 
-  // Tracking
-  if (trackingNumber) {
-    reply += ` Tracking number: ${trackingNumber}.`;
+  const f = fulfillments[0];
+
+  if (!f) {
+    reply += "It’s currently being prepared for shipment.";
+    return reply;
   }
 
-  if (trackingUrl) {
-    reply += ` You can track it here: ${trackingUrl}`;
+  reply += `Current status: ${humanizeFulfillmentStatus(f.status)}. `;
+
+  if (f.tracking_company) {
+    reply += `Shipped via ${f.tracking_company}. `;
   }
 
-  // ETA handling
-  if (eta) {
-    const etaDate = new Date(eta).toLocaleDateString();
-    reply += ` Estimated delivery: ${etaDate}.`;
-  } else if (fulfilledAt) {
-    const shipDate = new Date(fulfilledAt).toLocaleDateString();
-    reply += ` It shipped on ${shipDate}.`;
-  } else {
-    reply += ` We’ll notify you as soon as it ships.`;
+  if (f.tracking_number) {
+    reply += `Tracking number: ${f.tracking_number}. `;
   }
 
-  return reply;
+  if (f.tracking_urls?.[0]) {
+    reply += `Track here: ${f.tracking_urls[0]} `;
+  }
+
+  if (f.estimated_delivery_at) {
+    reply += `Estimated delivery: ${new Date(
+      f.estimated_delivery_at
+    ).toLocaleDateString()}.`;
+  } else if (f.delivered_at) {
+    reply += `Delivered on ${new Date(
+      f.delivered_at
+    ).toLocaleDateString()}.`;
+  }
+
+  return reply.trim();
 }
-
 
 function humanizeFulfillmentStatus(status) {
   switch (status) {
@@ -283,8 +258,6 @@ function humanizeFulfillmentStatus(status) {
       return "on the way";
     case "delivered":
       return "delivered";
-    case "cancelled":
-      return "cancelled";
     case "fulfilled":
       return "shipped";
     default:
